@@ -8,6 +8,7 @@ class UdpCom:
         self.udp_socket = socket(AF_INET, SOCK_DGRAM)
         self.udp_socket.setsockopt(SOL_SOCKET, SO_BROADCAST, 1)
         self.udp_socket.bind((self.ip_address, self.port))
+        self.udp_socket.setblocking(False)
     
     def send_msg(self, msg_payload : str):
         self.udp_socket.sendto(msg_payload.encode("utf-8"), (self.broadcast_addr, self.port))
