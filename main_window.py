@@ -31,6 +31,7 @@ class Ui_MainWindow(object):
         MainWindow.setSizePolicy(sizePolicy)
         MainWindow.setMinimumSize(QSize(640, 420))
         MainWindow.setMaximumSize(QSize(640, 420))
+        MainWindow.setWindowIcon(QIcon("data/icon.png"))
         MainWindow.setStyleSheet(u"/* Light, professional MainWindow style */\n"
 "QMainWindow {\n"
 "    background-color: #f7f8fa;       /* very light gray background */\n"
