@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 ################################################################################
-## Form generated from reading UI file 'main_windowNqHUOL.ui'
+## Form generated from reading UI file 'main_windowUGtebq.ui'
 ##
 ## Created by: Qt User Interface Compiler version 6.10.2
 ##
@@ -140,6 +140,34 @@ class Ui_MainWindow(object):
         self.label_4.setGeometry(QRect(10, 351, 41, 31))
         self.label_4.setFont(font)
         self.tabWidget.addTab(self.logger_tab, "")
+        self.command_tab = QWidget()
+        self.command_tab.setObjectName(u"command_tab")
+        self.send_cmd_button = QPushButton(self.command_tab)
+        self.send_cmd_button.setObjectName(u"send_cmd_button")
+        self.send_cmd_button.setGeometry(QRect(420, 30, 141, 31))
+        self.send_cmd_button.setFont(font)
+        self.cmd_comboBox = QComboBox(self.command_tab)
+        self.cmd_comboBox.addItem("")
+        self.cmd_comboBox.addItem("")
+        self.cmd_comboBox.addItem("")
+        self.cmd_comboBox.setObjectName(u"cmd_comboBox")
+        self.cmd_comboBox.setGeometry(QRect(101, 30, 171, 31))
+        font2 = QFont()
+        font2.setPointSize(12)
+        self.cmd_comboBox.setFont(font2)
+        self.label = QLabel(self.command_tab)
+        self.label.setObjectName(u"label")
+        self.label.setGeometry(QRect(10, 30, 91, 31))
+        self.label.setFont(font2)
+        self.label_8 = QLabel(self.command_tab)
+        self.label_8.setObjectName(u"label_8")
+        self.label_8.setGeometry(QRect(280, 30, 91, 31))
+        self.label_8.setFont(font2)
+        self.cmd_lineEdit = QLineEdit(self.command_tab)
+        self.cmd_lineEdit.setObjectName(u"cmd_lineEdit")
+        self.cmd_lineEdit.setGeometry(QRect(372, 34, 41, 21))
+        self.cmd_lineEdit.setFont(font2)
+        self.tabWidget.addTab(self.command_tab, "")
         self.status_tab = QWidget()
         self.status_tab.setObjectName(u"status_tab")
         self.tabWidget.addTab(self.status_tab, "")
@@ -222,6 +250,15 @@ class Ui_MainWindow(object):
         self.ipLineEdit.setText(QCoreApplication.translate("MainWindow", u"255.255.255.255", None))
         self.label_4.setText(QCoreApplication.translate("MainWindow", u"IPv4:", None))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.logger_tab), QCoreApplication.translate("MainWindow", u"Logger", None))
+        self.send_cmd_button.setText(QCoreApplication.translate("MainWindow", u"Send Command", None))
+        self.cmd_comboBox.setItemText(0, QCoreApplication.translate("MainWindow", u"Print Recv Msg", None))
+        self.cmd_comboBox.setItemText(1, QCoreApplication.translate("MainWindow", u"Induce Voting fault", None))
+        self.cmd_comboBox.setItemText(2, QCoreApplication.translate("MainWindow", u"Induce CRC fault", None))
+
+        self.label.setText(QCoreApplication.translate("MainWindow", u"Command:", None))
+        self.label_8.setText(QCoreApplication.translate("MainWindow", u"Send to ID:", None))
+        self.cmd_lineEdit.setText(QCoreApplication.translate("MainWindow", u"255", None))
+        self.tabWidget.setTabText(self.tabWidget.indexOf(self.command_tab), QCoreApplication.translate("MainWindow", u"Command", None))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.status_tab), QCoreApplication.translate("MainWindow", u"Status", None))
     # retranslateUi
 

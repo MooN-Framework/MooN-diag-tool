@@ -329,6 +329,113 @@ li.checked::marker { content: &quot;\2612&quot;; }
       </property>
      </widget>
     </widget>
+    <widget class="QWidget" name="command_tab">
+     <attribute name="title">
+      <string>Command</string>
+     </attribute>
+     <widget class="QPushButton" name="send_cmd_button">
+      <property name="geometry">
+       <rect>
+        <x>420</x>
+        <y>30</y>
+        <width>141</width>
+        <height>31</height>
+       </rect>
+      </property>
+      <property name="font">
+       <font>
+        <pointsize>11</pointsize>
+       </font>
+      </property>
+      <property name="text">
+       <string>Send Command</string>
+      </property>
+     </widget>
+     <widget class="QComboBox" name="cmd_comboBox">
+      <property name="geometry">
+       <rect>
+        <x>101</x>
+        <y>30</y>
+        <width>171</width>
+        <height>31</height>
+       </rect>
+      </property>
+      <property name="font">
+       <font>
+        <pointsize>12</pointsize>
+       </font>
+      </property>
+      <item>
+       <property name="text">
+        <string>Print Recv Msg</string>
+       </property>
+      </item>
+      <item>
+       <property name="text">
+        <string>Induce Voting fault</string>
+       </property>
+      </item>
+      <item>
+       <property name="text">
+        <string>Induce CRC fault</string>
+       </property>
+      </item>
+     </widget>
+     <widget class="QLabel" name="label">
+      <property name="geometry">
+       <rect>
+        <x>10</x>
+        <y>30</y>
+        <width>91</width>
+        <height>31</height>
+       </rect>
+      </property>
+      <property name="font">
+       <font>
+        <pointsize>12</pointsize>
+       </font>
+      </property>
+      <property name="text">
+       <string>Command:</string>
+      </property>
+     </widget>
+     <widget class="QLabel" name="label_8">
+      <property name="geometry">
+       <rect>
+        <x>280</x>
+        <y>30</y>
+        <width>91</width>
+        <height>31</height>
+       </rect>
+      </property>
+      <property name="font">
+       <font>
+        <pointsize>12</pointsize>
+       </font>
+      </property>
+      <property name="text">
+       <string>Send to ID:</string>
+      </property>
+     </widget>
+     <widget class="QLineEdit" name="cmd_lineEdit">
+      <property name="geometry">
+       <rect>
+        <x>372</x>
+        <y>34</y>
+        <width>41</width>
+        <height>21</height>
+       </rect>
+      </property>
+      <property name="font">
+       <font>
+        <pointsize>12</pointsize>
+       </font>
+      </property>
+      <property name="text">
+       <string>255</string>
+      </property>
+     </widget>
+    </widget>
     <widget class="QWidget" name="status_tab">
      <attribute name="title">
       <string>Status</string>
