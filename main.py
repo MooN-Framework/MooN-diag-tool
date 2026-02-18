@@ -2,36 +2,10 @@ import sys
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtGui import QIntValidator
-from PySide6.QtCore import QThread, Signal
 from main_window import Ui_MainWindow
-from util.udp_com import UdpCom
-
+from util.udp_com import UdpCom, UdpListener
+from util.net_helper import *
 sock : UdpCom = None
-
-class UdpListener(QThread):
-    message_received = Signal(str)  # signal to send message to UI
-
-    def __init__(self, udp_com):
-        super().__init__()
-        self.udp_com = udp_com
-        self._running = True
-
-    def run(self):
-        while self._running and self.udp_com and self.udp_com.udp_socket:
-            try:
-                data, addr = self.udp_com.udp_socket.recvfrom(4096)
-                msg = data.decode("utf-8")
-                self.message_received.emit(msg)
-            except BlockingIOError:
-                self.msleep(50)  # sleep 50ms and try again
-            except Exception as e:
-                break
-
-    def stop(self):
-        self._running = False
-        self.quit()
-        self.wait()
-
 
 class UI(QtWidgets.QMainWindow):
     def __init__(self):
@@ -42,10 +16,13 @@ class UI(QtWidgets.QMainWindow):
         self.ui.loggingTextBox.clear()
         # Init portTextbox
         self.ui.portLineEdit.clear()
-        self.ui.portLineEdit.textChanged.connect(self.port_lineedit_handler)
-        validator = QIntValidator(0, 65535, self)
-        self.ui.portLineEdit.setValidator(validator)
+        self.ui.portLineEdit.textChanged.connect(self.update_socket_button_handler)
+        port_validator = QIntValidator(0, 65535, self)
+        self.ui.portLineEdit.setValidator(port_validator)
         self.ui.portLineEdit.setMaxLength(5)
+        # Init ipTextbox
+        self.ui.ipLineEdit.clear()
+        self.ui.ipLineEdit.textChanged.connect(self.update_socket_button_handler)
         # Init connection button
         self.ui.connectSocketButton.setEnabled(False)
         self.ui.connectSocketButton.clicked.connect(self.socket_button_handler)
@@ -58,7 +35,7 @@ class UI(QtWidgets.QMainWindow):
         # Init combobox
         self.ui.debug_level_comboBox.currentIndexChanged.connect(self.debug_level_handler)
         self.listener_thread = None
-    
+
     def closeEvent(self, event):
         global sock
         if hasattr(self, "listener_thread") and self.listener_thread:
@@ -82,8 +59,10 @@ class UI(QtWidgets.QMainWindow):
     def debug_level_handler(self):
         print(self.ui.debug_level_comboBox.currentText())
 
-    def port_lineedit_handler(self):
-        self.ui.connectSocketButton.setEnabled(self.ui.portLineEdit.hasAcceptableInput())
+    def update_socket_button_handler(self):
+        ip_valid = is_valid_ipv4(self.ui.ipLineEdit.text())
+        port_valid = self.ui.portLineEdit.hasAcceptableInput()
+        self.ui.connectSocketButton.setEnabled(ip_valid and port_valid)
 
     def socket_button_handler(self):
         global sock
@@ -103,8 +82,6 @@ class UI(QtWidgets.QMainWindow):
             self.listener_thread.start()
         except:
             self.log_to_debug_textbox("Error connecting to socket at " + ip_addr + ":" + str(port))
-
-
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)

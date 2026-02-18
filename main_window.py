@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 ################################################################################
-## Form generated from reading UI file 'main_windowZfTVYT.ui'
+## Form generated from reading UI file 'main_windowNqHUOL.ui'
 ##
 ## Created by: Qt User Interface Compiler version 6.10.2
 ##
@@ -115,12 +115,12 @@ class Ui_MainWindow(object):
         self.label_2.setFont(font)
         self.label_3 = QLabel(self.logger_tab)
         self.label_3.setObjectName(u"label_3")
-        self.label_3.setGeometry(QRect(10, 350, 41, 31))
+        self.label_3.setGeometry(QRect(175, 350, 41, 31))
         self.label_3.setFont(font)
         self.connectSocketButton = QPushButton(self.logger_tab)
         self.connectSocketButton.setObjectName(u"connectSocketButton")
         self.connectSocketButton.setEnabled(True)
-        self.connectSocketButton.setGeometry(QRect(120, 350, 91, 31))
+        self.connectSocketButton.setGeometry(QRect(280, 350, 91, 31))
         font1 = QFont()
         font1.setPointSize(11)
         font1.setBold(False)
@@ -129,8 +129,16 @@ class Ui_MainWindow(object):
         self.connectSocketButton.setFont(font1)
         self.portLineEdit = QLineEdit(self.logger_tab)
         self.portLineEdit.setObjectName(u"portLineEdit")
-        self.portLineEdit.setGeometry(QRect(50, 350, 61, 31))
+        self.portLineEdit.setGeometry(QRect(210, 350, 51, 31))
         self.portLineEdit.setFont(font)
+        self.ipLineEdit = QLineEdit(self.logger_tab)
+        self.ipLineEdit.setObjectName(u"ipLineEdit")
+        self.ipLineEdit.setGeometry(QRect(50, 350, 121, 31))
+        self.ipLineEdit.setFont(font)
+        self.label_4 = QLabel(self.logger_tab)
+        self.label_4.setObjectName(u"label_4")
+        self.label_4.setGeometry(QRect(10, 351, 41, 31))
+        self.label_4.setFont(font)
         self.tabWidget.addTab(self.logger_tab, "")
         self.status_tab = QWidget()
         self.status_tab.setObjectName(u"status_tab")
@@ -211,6 +219,8 @@ class Ui_MainWindow(object):
         self.label_3.setText(QCoreApplication.translate("MainWindow", u"Port:", None))
         self.connectSocketButton.setText(QCoreApplication.translate("MainWindow", u"Connect", None))
         self.portLineEdit.setText(QCoreApplication.translate("MainWindow", u"12345", None))
+        self.ipLineEdit.setText(QCoreApplication.translate("MainWindow", u"255.255.255.255", None))
+        self.label_4.setText(QCoreApplication.translate("MainWindow", u"IPv4:", None))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.logger_tab), QCoreApplication.translate("MainWindow", u"Logger", None))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.status_tab), QCoreApplication.translate("MainWindow", u"Status", None))
     # retranslateUi
