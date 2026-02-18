@@ -32,8 +32,6 @@ class UI(QtWidgets.QMainWindow):
         # Init combobox
         self.ui.debug_level_comboBox.currentIndexChanged.connect(self.debug_level_handler)
         
-
-
     def log_to_debug_textbox(self, log: str):
         self.ui.loggingTextBox.append(log)
         doc = self.ui.loggingTextBox.document()
@@ -53,8 +51,17 @@ class UI(QtWidgets.QMainWindow):
     def socket_button_handler(self):
         global sock
         if sock is not None:
-            sock.drop_socket()    
-        sock = UdpCom("0.0.0.0", 8000)
+            sock.drop_socket()
+            self.log_to_debug_textbox("Dropped socket.")
+        ip_addr = "0.0.0.0"
+        port = int(self.ui.portLineEdit.text())
+        try:
+            sock = UdpCom(ip_addr, port)
+            self.log_to_debug_textbox("Successfully connected to socket at " + ip_addr + ":" + str(port))
+            sock.send_msg("Test payload")
+        except:
+            self.log_to_debug_textbox("Error connecting to socket at " + ip_addr + ":" + str(port))
+
 
 
 if __name__ == "__main__":
