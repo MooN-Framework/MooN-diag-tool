@@ -96,7 +96,16 @@ class UI(QtWidgets.QMainWindow):
         self.ui.send_cmd_button.setEnabled(state and id_valid)
 
     def send_cmd_button_handler(self):
-        pass
+        cmd_str = self.ui.cmd_comboBox.currentText()
+        match cmd_str:
+            case "Print Recv Msg":
+                cmd_id = 0
+            case "Inducing Voting fault":
+                cmd_id = 1
+            case "Induce CRC fault":
+                cmd_id = 2
+        cmd_sys_id = int(self.ui.cmd_lineEdit.text())
+        self.sock.send_msg(f"MASTER:{cmd_sys_id}:InitialSync:{cmd_id}")
 
     def socket_button_handler(self):
         if self.listener_thread:
