@@ -3,13 +3,22 @@ import logging
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtGui import QIntValidator, QIcon
+from PySide6.QtCore import QSettings
 from main_window import Ui_MainWindow
 from util.udp_com import UdpCom, UdpListener
 from util.net_helper import *
+from datetime import datetime
 
 
 logger = logging.getLogger("DiagnoseSwbft")
 logger.setLevel(logging.DEBUG)
+
+COLORS = {
+    "INFO": "#2196F3",
+    "SUCCESS": "#4CAF50",
+    "WARNING": "#FFC107",
+    "ERROR": "#F44336"
+}
 
 class UI(QtWidgets.QMainWindow):
     def __init__(self):
@@ -58,7 +67,15 @@ class UI(QtWidgets.QMainWindow):
         self.listener_thread = None
         self.sock = UdpCom()
         self.sock.socket_state_changed.connect(self.on_socket_state_changed)
-        
+        # Load User Settings
+        self.settings = QSettings("KW", "SwbftDiagnoseTool")
+        loaded_port = self.settings.value("port","")
+        loaded_broadcastip = self.settings.value("broadcastip", "")
+        loaded_cmd_id = self.settings.value("cmd_id", "")
+        self.ui.portLineEdit.setText(loaded_port)
+        self.ui.ipLineEdit.setText(loaded_broadcastip)
+        self.ui.cmd_lineEdit.setText(loaded_cmd_id)     
+    
     def closeEvent(self, event):
         if hasattr(self, "listener_thread") and self.listener_thread:
             self.listener_thread.stop()
@@ -68,8 +85,36 @@ class UI(QtWidgets.QMainWindow):
             self.sock = None
         event.accept()
     
+    def parse_master_msg(self, splitted_log: str) -> str:
+        return "[MASTER] ==> NODE" + splitted_log[1]  + " ==> execute " + self.int_to_cmd_str(int(splitted_log[3]))
+
+    def parse_system_msg(self, splitted_log) -> str:
+        if len(splitted_log) == 3:
+            return "[NODE" + splitted_log[1] + "] [" + splitted_log[2] + "]"
+        elif len(splitted_log) == 4:
+            return "[NODE" + splitted_log[1] + "] [" + splitted_log[2] + "] Value(" + hex(int(splitted_log[3])) + ")" 
+        
+    def parse_system_log(log: str) -> str:
+        pass
+
     def log_to_debug_textbox(self, log: str):
-        self.ui.loggingTextBox.append(log)
+        now = datetime.now().strftime("%H:%M:%S")
+        splitted_log = log.split(":")
+        print(splitted_log)
+        fmt_log = log
+        color = COLORS["INFO"]
+        match splitted_log[0]:
+            case "MASTER":
+                fmt_log = self.parse_master_msg(splitted_log)
+                color = COLORS["ERROR"]
+            case "SYSTEM":
+                fmt_log = self.parse_system_msg(splitted_log)
+            case "LOG":
+                pass
+        
+        self.ui.loggingTextBox.append(f'<span style="color:gray;">[{now}]</span> '
+        f'<span style="color:{color};"></span> '
+        f'{fmt_log}')
         doc = self.ui.loggingTextBox.document()
         while doc.blockCount() > 6000:
             cursor = QtGui.QTextCursor(doc)
@@ -95,17 +140,32 @@ class UI(QtWidgets.QMainWindow):
         id_valid = self.ui.cmd_lineEdit.hasAcceptableInput()
         self.ui.send_cmd_button.setEnabled(state and id_valid)
 
-    def send_cmd_button_handler(self):
-        cmd_str = self.ui.cmd_comboBox.currentText()
-        match cmd_str:
+    def int_to_cmd_str(self, cmd_int : int) -> str:
+        match cmd_int:
+            case 0:
+                cmd_str = "Print Recv Msg"
+            case 1:
+                cmd_str = "Induce CRC fault"
+            case 2:
+                cmd_str = "Induce Voting fault"
+        return cmd_str
+    
+    def str_to_cmd_int(self, string : str) -> int:
+        match string:
             case "Print Recv Msg":
                 cmd_id = 0
             case "Induce CRC fault":
                 cmd_id = 1
             case "Induce Voting fault":
                 cmd_id = 2
+        return cmd_id
+
+    def send_cmd_button_handler(self):
+        cmd_str = self.ui.cmd_comboBox.currentText()
+        cmd_id = self.str_to_cmd_int(cmd_str)
         cmd_sys_id = int(self.ui.cmd_lineEdit.text())
         self.sock.send_msg(f"MASTER:{cmd_sys_id}:InitialSync:{cmd_id}")
+        self.settings.setValue("cmd_id", self.ui.cmd_lineEdit.text())
 
     def socket_button_handler(self):
         if self.listener_thread:
@@ -121,10 +181,12 @@ class UI(QtWidgets.QMainWindow):
         broadcast_addr = self.ui.ipLineEdit.text()
         try:
             self.sock.connect_socket(ip_addr, port, broadcast_addr)
-            self.log_to_debug_textbox("Successfully connected to socket at " + ip_addr + ":" + str(port))
             self.listener_thread = UdpListener(self.sock)
             self.listener_thread.message_received.connect(self.log_to_debug_textbox)
             self.listener_thread.start()
+            self.log_to_debug_textbox("Successfully connected to socket at " + ip_addr + ":" + str(port))
+            self.settings.setValue("port",self.ui.portLineEdit.text())
+            self.settings.setValue("broadcastip", self.ui.ipLineEdit.text())
         except:
             self.log_to_debug_textbox("Error connecting to socket at " + ip_addr + ":" + str(port))
 
