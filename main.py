@@ -100,9 +100,9 @@ class UI(QtWidgets.QMainWindow):
         match cmd_str:
             case "Print Recv Msg":
                 cmd_id = 0
-            case "Inducing Voting fault":
-                cmd_id = 1
             case "Induce CRC fault":
+                cmd_id = 1
+            case "Induce Voting fault":
                 cmd_id = 2
         cmd_sys_id = int(self.ui.cmd_lineEdit.text())
         self.sock.send_msg(f"MASTER:{cmd_sys_id}:InitialSync:{cmd_id}")
