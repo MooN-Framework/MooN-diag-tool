@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 ################################################################################
-## Form generated from reading UI file 'main_windowUGtebq.ui'
+## Form generated from reading UI file 'main_windowDItKtH.ui'
 ##
 ## Created by: Qt User Interface Compiler version 6.10.2
 ##
@@ -15,9 +15,9 @@ from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
     QFont, QFontDatabase, QGradient, QIcon,
     QImage, QKeySequence, QLinearGradient, QPainter,
     QPalette, QPixmap, QRadialGradient, QTransform)
-from PySide6.QtWidgets import (QApplication, QComboBox, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QSizePolicy, QTabWidget,
-    QTextEdit, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QGridLayout,
+    QLabel, QLineEdit, QMainWindow, QPushButton,
+    QSizePolicy, QTabWidget, QTextEdit, QWidget)
 
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
@@ -31,7 +31,6 @@ class Ui_MainWindow(object):
         MainWindow.setSizePolicy(sizePolicy)
         MainWindow.setMinimumSize(QSize(640, 420))
         MainWindow.setMaximumSize(QSize(640, 420))
-        MainWindow.setWindowIcon(QIcon("data/icon.png"))
         MainWindow.setStyleSheet(u"/* Light, professional MainWindow style */\n"
 "QMainWindow {\n"
 "    background-color: #f7f8fa;       /* very light gray background */\n"
@@ -99,29 +98,16 @@ class Ui_MainWindow(object):
 "    selection-color: #000000;\n"
 "}")
         self.loggingTextBox.setReadOnly(True)
-        self.debug_level_comboBox = QComboBox(self.logger_tab)
-        self.debug_level_comboBox.addItem("")
-        self.debug_level_comboBox.addItem("")
-        self.debug_level_comboBox.addItem("")
-        self.debug_level_comboBox.addItem("")
-        self.debug_level_comboBox.addItem("")
-        self.debug_level_comboBox.setObjectName(u"debug_level_comboBox")
-        self.debug_level_comboBox.setGeometry(QRect(520, 350, 101, 31))
-        font = QFont()
-        font.setPointSize(11)
-        self.debug_level_comboBox.setFont(font)
-        self.label_2 = QLabel(self.logger_tab)
-        self.label_2.setObjectName(u"label_2")
-        self.label_2.setGeometry(QRect(420, 350, 101, 31))
-        self.label_2.setFont(font)
         self.label_3 = QLabel(self.logger_tab)
         self.label_3.setObjectName(u"label_3")
         self.label_3.setGeometry(QRect(175, 350, 41, 31))
+        font = QFont()
+        font.setPointSize(11)
         self.label_3.setFont(font)
         self.connectSocketButton = QPushButton(self.logger_tab)
         self.connectSocketButton.setObjectName(u"connectSocketButton")
         self.connectSocketButton.setEnabled(True)
-        self.connectSocketButton.setGeometry(QRect(280, 350, 91, 31))
+        self.connectSocketButton.setGeometry(QRect(270, 350, 91, 31))
         font1 = QFont()
         font1.setPointSize(11)
         font1.setBold(False)
@@ -140,6 +126,15 @@ class Ui_MainWindow(object):
         self.label_4.setObjectName(u"label_4")
         self.label_4.setGeometry(QRect(10, 351, 41, 31))
         self.label_4.setFont(font)
+        self.label_2 = QLabel(self.logger_tab)
+        self.label_2.setObjectName(u"label_2")
+        self.label_2.setGeometry(QRect(460, 350, 91, 31))
+        self.label_2.setFont(font)
+        self.comboBox = QComboBox(self.logger_tab)
+        self.comboBox.addItem("")
+        self.comboBox.setObjectName(u"comboBox")
+        self.comboBox.setGeometry(QRect(551, 350, 81, 31))
+        self.comboBox.setFont(font)
         self.tabWidget.addTab(self.logger_tab, "")
         self.command_tab = QWidget()
         self.command_tab.setObjectName(u"command_tab")
@@ -171,12 +166,34 @@ class Ui_MainWindow(object):
         self.tabWidget.addTab(self.command_tab, "")
         self.status_tab = QWidget()
         self.status_tab.setObjectName(u"status_tab")
+        self.gridLayoutWidget = QWidget(self.status_tab)
+        self.gridLayoutWidget.setObjectName(u"gridLayoutWidget")
+        self.gridLayoutWidget.setGeometry(QRect(19, 19, 601, 351))
+        self.status_grid = QGridLayout(self.gridLayoutWidget)
+        self.status_grid.setObjectName(u"status_grid")
+        self.status_grid.setContentsMargins(0, 0, 0, 0)
         self.tabWidget.addTab(self.status_tab, "")
+        self.options_tab = QWidget()
+        self.options_tab.setObjectName(u"options_tab")
+        self.checkBox = QCheckBox(self.options_tab)
+        self.checkBox.setObjectName(u"checkBox")
+        self.checkBox.setGeometry(QRect(30, 11, 161, 21))
+        self.checkBox.setFont(font)
+        self.tabWidget.addTab(self.options_tab, "")
         MainWindow.setCentralWidget(self.centralwidget)
+        QWidget.setTabOrder(self.ipLineEdit, self.portLineEdit)
+        QWidget.setTabOrder(self.portLineEdit, self.connectSocketButton)
+        QWidget.setTabOrder(self.connectSocketButton, self.comboBox)
+        QWidget.setTabOrder(self.comboBox, self.cmd_lineEdit)
+        QWidget.setTabOrder(self.cmd_lineEdit, self.loggingTextBox)
+        QWidget.setTabOrder(self.loggingTextBox, self.tabWidget)
+        QWidget.setTabOrder(self.tabWidget, self.checkBox)
+        QWidget.setTabOrder(self.checkBox, self.send_cmd_button)
+        QWidget.setTabOrder(self.send_cmd_button, self.cmd_comboBox)
 
         self.retranslateUi(MainWindow)
 
-        self.tabWidget.setCurrentIndex(0)
+        self.tabWidget.setCurrentIndex(3)
 
 
         QMetaObject.connectSlotsByName(MainWindow)
@@ -238,18 +255,14 @@ class Ui_MainWindow(object):
 "<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; font-family:'Consolas','monospace'; font-size:12pt;\"><br /></p>\n"
 "<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; font-family:'Consolas','monospace'; font-size:12pt;\"><br /></p>\n"
 "<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; font-family:'Consolas','monospace'; font-size:12pt;\"><br /></p></body></html>", None))
-        self.debug_level_comboBox.setItemText(0, QCoreApplication.translate("MainWindow", u"TRACE", None))
-        self.debug_level_comboBox.setItemText(1, QCoreApplication.translate("MainWindow", u"DEBUG", None))
-        self.debug_level_comboBox.setItemText(2, QCoreApplication.translate("MainWindow", u"INFO", None))
-        self.debug_level_comboBox.setItemText(3, QCoreApplication.translate("MainWindow", u"WARNING", None))
-        self.debug_level_comboBox.setItemText(4, QCoreApplication.translate("MainWindow", u"ERROR", None))
-
-        self.label_2.setText(QCoreApplication.translate("MainWindow", u"Debug Level:", None))
         self.label_3.setText(QCoreApplication.translate("MainWindow", u"Port:", None))
         self.connectSocketButton.setText(QCoreApplication.translate("MainWindow", u"Connect", None))
         self.portLineEdit.setText(QCoreApplication.translate("MainWindow", u"12345", None))
         self.ipLineEdit.setText(QCoreApplication.translate("MainWindow", u"255.255.255.255", None))
         self.label_4.setText(QCoreApplication.translate("MainWindow", u"IPv4:", None))
+        self.label_2.setText(QCoreApplication.translate("MainWindow", u"Filter Nodes:", None))
+        self.comboBox.setItemText(0, QCoreApplication.translate("MainWindow", u"ALL", None))
+
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.logger_tab), QCoreApplication.translate("MainWindow", u"Logger", None))
         self.send_cmd_button.setText(QCoreApplication.translate("MainWindow", u"Send Command", None))
         self.cmd_comboBox.setItemText(0, QCoreApplication.translate("MainWindow", u"Print Recv Msg", None))
@@ -261,5 +274,7 @@ class Ui_MainWindow(object):
         self.cmd_lineEdit.setText(QCoreApplication.translate("MainWindow", u"255", None))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.command_tab), QCoreApplication.translate("MainWindow", u"Command", None))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.status_tab), QCoreApplication.translate("MainWindow", u"Status", None))
+        self.checkBox.setText(QCoreApplication.translate("MainWindow", u"Connect on startup", None))
+        self.tabWidget.setTabText(self.tabWidget.indexOf(self.options_tab), QCoreApplication.translate("MainWindow", u"Options", None))
     # retranslateUi
 

@@ -9,7 +9,6 @@ from util.udp_com import UdpCom, UdpListener
 from util.net_helper import *
 from datetime import datetime
 
-
 logger = logging.getLogger("DiagnoseSwbft")
 logger.setLevel(logging.DEBUG)
 
@@ -61,8 +60,8 @@ class UI(QtWidgets.QMainWindow):
         self.ui.cmd_lineEdit.setValidator(id_validator)
         self.ui.cmd_lineEdit.setMaxLength(3)
         self.ui.cmd_lineEdit.textChanged.connect(self.update_cmd_button_handler)
-        # Init combobox
-        self.ui.debug_level_comboBox.currentIndexChanged.connect(self.debug_level_handler)
+        # Init connect on startup checkbox
+        self.ui.checkBox.stateChanged.connect(self.on_startup_connect_handler)
         # Init own classes
         self.listener_thread = None
         self.sock = UdpCom()
@@ -72,9 +71,14 @@ class UI(QtWidgets.QMainWindow):
         loaded_port = self.settings.value("port","")
         loaded_broadcastip = self.settings.value("broadcastip", "")
         loaded_cmd_id = self.settings.value("cmd_id", "")
+        loaded_on_startup_connect = self.settings.value("connect_startup", False, type=bool)
         self.ui.portLineEdit.setText(loaded_port)
         self.ui.ipLineEdit.setText(loaded_broadcastip)
-        self.ui.cmd_lineEdit.setText(loaded_cmd_id)     
+        self.ui.cmd_lineEdit.setText(loaded_cmd_id)
+        self.ui.checkBox.setChecked(loaded_on_startup_connect)
+        # After load settings stuff
+        if loaded_on_startup_connect and self.is_ip_and_port_valid():
+            self.socket_button_handler()
     
     def closeEvent(self, event):
         if hasattr(self, "listener_thread") and self.listener_thread:
@@ -124,13 +128,14 @@ class UI(QtWidgets.QMainWindow):
             cursor.removeSelectedText()
             cursor.deleteChar()
 
-    def debug_level_handler(self):
-        print(self.ui.debug_level_comboBox.currentText())
-
-    def update_socket_button_handler(self):
+    def is_ip_and_port_valid(self) -> bool:
         ip_valid = is_valid_ipv4(self.ui.ipLineEdit.text())
         port_valid = self.ui.portLineEdit.hasAcceptableInput()
-        self.ui.connectSocketButton.setEnabled(ip_valid and port_valid)
+        return ip_valid and port_valid
+
+    def update_socket_button_handler(self):
+        valid = self.is_ip_and_port_valid()
+        self.ui.connectSocketButton.setEnabled(valid)
 
     def update_cmd_button_handler(self):
         socket_valid = self.sock.udp_socket is not None
@@ -167,6 +172,9 @@ class UI(QtWidgets.QMainWindow):
         cmd_sys_id = int(self.ui.cmd_lineEdit.text())
         self.sock.send_msg(f"MASTER:{cmd_sys_id}:InitialSync:{cmd_id}")
         self.settings.setValue("cmd_id", self.ui.cmd_lineEdit.text())
+
+    def on_startup_connect_handler(self, state):
+        self.settings.setValue("connect_startup", state)
 
     def socket_button_handler(self):
         if self.listener_thread:

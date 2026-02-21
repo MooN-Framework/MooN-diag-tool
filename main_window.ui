@@ -86,7 +86,7 @@ QPushButton:pressed {
      <enum>QTabWidget::TabShape::Rounded</enum>
     </property>
     <property name="currentIndex">
-     <number>0</number>
+     <number>3</number>
     </property>
     <widget class="QWidget" name="logger_tab">
      <attribute name="title">
@@ -174,64 +174,6 @@ li.checked::marker { content: &quot;\2612&quot;; }
 &lt;p style=&quot;-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; font-family:'Consolas','monospace'; font-size:12pt;&quot;&gt;&lt;br /&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
       </property>
      </widget>
-     <widget class="QComboBox" name="debug_level_comboBox">
-      <property name="geometry">
-       <rect>
-        <x>520</x>
-        <y>350</y>
-        <width>101</width>
-        <height>31</height>
-       </rect>
-      </property>
-      <property name="font">
-       <font>
-        <pointsize>11</pointsize>
-       </font>
-      </property>
-      <item>
-       <property name="text">
-        <string>TRACE</string>
-       </property>
-      </item>
-      <item>
-       <property name="text">
-        <string>DEBUG</string>
-       </property>
-      </item>
-      <item>
-       <property name="text">
-        <string>INFO</string>
-       </property>
-      </item>
-      <item>
-       <property name="text">
-        <string>WARNING</string>
-       </property>
-      </item>
-      <item>
-       <property name="text">
-        <string>ERROR</string>
-       </property>
-      </item>
-     </widget>
-     <widget class="QLabel" name="label_2">
-      <property name="geometry">
-       <rect>
-        <x>420</x>
-        <y>350</y>
-        <width>101</width>
-        <height>31</height>
-       </rect>
-      </property>
-      <property name="font">
-       <font>
-        <pointsize>11</pointsize>
-       </font>
-      </property>
-      <property name="text">
-       <string>Debug Level:</string>
-      </property>
-     </widget>
      <widget class="QLabel" name="label_3">
       <property name="geometry">
        <rect>
@@ -256,7 +198,7 @@ li.checked::marker { content: &quot;\2612&quot;; }
       </property>
       <property name="geometry">
        <rect>
-        <x>280</x>
+        <x>270</x>
         <y>350</y>
         <width>91</width>
         <height>31</height>
@@ -327,6 +269,44 @@ li.checked::marker { content: &quot;\2612&quot;; }
       <property name="text">
        <string>IPv4:</string>
       </property>
+     </widget>
+     <widget class="QLabel" name="label_2">
+      <property name="geometry">
+       <rect>
+        <x>460</x>
+        <y>350</y>
+        <width>91</width>
+        <height>31</height>
+       </rect>
+      </property>
+      <property name="font">
+       <font>
+        <pointsize>11</pointsize>
+       </font>
+      </property>
+      <property name="text">
+       <string>Filter Nodes:</string>
+      </property>
+     </widget>
+     <widget class="QComboBox" name="comboBox">
+      <property name="geometry">
+       <rect>
+        <x>551</x>
+        <y>350</y>
+        <width>81</width>
+        <height>31</height>
+       </rect>
+      </property>
+      <property name="font">
+       <font>
+        <pointsize>11</pointsize>
+       </font>
+      </property>
+      <item>
+       <property name="text">
+        <string>ALL</string>
+       </property>
+      </item>
      </widget>
     </widget>
     <widget class="QWidget" name="command_tab">
@@ -440,10 +420,56 @@ li.checked::marker { content: &quot;\2612&quot;; }
      <attribute name="title">
       <string>Status</string>
      </attribute>
+     <widget class="QWidget" name="gridLayoutWidget">
+      <property name="geometry">
+       <rect>
+        <x>19</x>
+        <y>19</y>
+        <width>601</width>
+        <height>351</height>
+       </rect>
+      </property>
+      <layout class="QGridLayout" name="status_grid"/>
+     </widget>
+    </widget>
+    <widget class="QWidget" name="options_tab">
+     <attribute name="title">
+      <string>Options</string>
+     </attribute>
+     <widget class="QCheckBox" name="checkBox">
+      <property name="geometry">
+       <rect>
+        <x>30</x>
+        <y>11</y>
+        <width>161</width>
+        <height>21</height>
+       </rect>
+      </property>
+      <property name="font">
+       <font>
+        <pointsize>11</pointsize>
+       </font>
+      </property>
+      <property name="text">
+       <string>Connect on startup</string>
+      </property>
+     </widget>
     </widget>
    </widget>
   </widget>
  </widget>
+ <tabstops>
+  <tabstop>ipLineEdit</tabstop>
+  <tabstop>portLineEdit</tabstop>
+  <tabstop>connectSocketButton</tabstop>
+  <tabstop>comboBox</tabstop>
+  <tabstop>cmd_lineEdit</tabstop>
+  <tabstop>loggingTextBox</tabstop>
+  <tabstop>tabWidget</tabstop>
+  <tabstop>checkBox</tabstop>
+  <tabstop>send_cmd_button</tabstop>
+  <tabstop>cmd_comboBox</tabstop>
+ </tabstops>
  <resources/>
  <connections/>
 </ui>
