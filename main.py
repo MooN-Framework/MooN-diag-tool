@@ -94,8 +94,8 @@ class UI(QtWidgets.QMainWindow):
         elif len(splitted_log) == 4:
             return "[NODE" + splitted_log[1] + "] [" + splitted_log[2] + "] Value(" + hex(int(splitted_log[3])) + ")" 
         
-    def parse_system_log(log: str) -> str:
-        pass
+    def parse_system_log(self, splitted_log: str) -> str:
+        return "[NODE" + splitted_log[1] + "] [" + splitted_log[2] + "] " + splitted_log[3] 
 
     def log_to_debug_textbox(self, log: str):
         now = datetime.now().strftime("%H:%M:%S")
@@ -109,8 +109,9 @@ class UI(QtWidgets.QMainWindow):
                 color = COLORS["ERROR"]
             case "SYSTEM":
                 fmt_log = self.parse_system_msg(splitted_log)
+                return
             case "LOG":
-                pass
+                fmt_log = self.parse_system_log(splitted_log)
         
         self.ui.loggingTextBox.append(f'<span style="color:gray;">[{now}]</span> '
         f'<span style="color:{color};"></span> '
