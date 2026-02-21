@@ -2,8 +2,11 @@ import sys
 import logging
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtUiTools import QUiLoader
-from PySide6.QtGui import QIntValidator, QIcon
-from PySide6.QtCore import QSettings
+from PySide6.QtGui import QIntValidator, QIcon, QFont
+from PySide6.QtCore import QSettings, Qt
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QGridLayout, QLabel
+)
 from main_window import Ui_MainWindow
 from util.udp_com import UdpCom, UdpListener
 from util.net_helper import *
@@ -18,6 +21,16 @@ COLORS = {
     "WARNING": "#FFC107",
     "ERROR": "#F44336"
 }
+
+class LedIndicator(QLabel):
+    def __init__(self, color="red", size=16):
+        super().__init__()
+        self.setFixedSize(size, size)
+        self.setStyleSheet(f"""
+            background-color: {color};
+            border-radius: {size // 2}px;
+            border: 1px solid black;
+        """)
 
 class UI(QtWidgets.QMainWindow):
     def __init__(self):
@@ -80,6 +93,18 @@ class UI(QtWidgets.QMainWindow):
         if loaded_on_startup_connect and self.is_ip_and_port_valid():
             self.socket_button_handler()
     
+    def add_status_row(self, id, state, row):
+        label = QLabel("SystemID: Node" + str(id))
+        label2 = QLabel("Systemstatus: " + state)
+        led = LedIndicator("green")
+        font = QFont()
+        font.setPointSize(11)  # 11 pt
+        label.setFont(font)
+        label2.setFont(font)
+        self.ui.status_grid.addWidget(label, row, 0, alignment=Qt.AlignTop)
+        self.ui.status_grid.addWidget(label2, row, 0 + 1, alignment=Qt.AlignTop)
+        self.ui.status_grid.addWidget(led, row, 0 + 2, alignment=Qt.AlignTop)
+
     def closeEvent(self, event):
         if hasattr(self, "listener_thread") and self.listener_thread:
             self.listener_thread.stop()

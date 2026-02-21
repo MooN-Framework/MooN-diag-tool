@@ -86,7 +86,7 @@ QPushButton:pressed {
      <enum>QTabWidget::TabShape::Rounded</enum>
     </property>
     <property name="currentIndex">
-     <number>3</number>
+     <number>0</number>
     </property>
     <widget class="QWidget" name="logger_tab">
      <attribute name="title">
@@ -425,7 +425,7 @@ li.checked::marker { content: &quot;\2612&quot;; }
        <rect>
         <x>19</x>
         <y>19</y>
-        <width>601</width>
+        <width>441</width>
         <height>351</height>
        </rect>
       </property>

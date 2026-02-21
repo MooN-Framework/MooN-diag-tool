@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 ################################################################################
-## Form generated from reading UI file 'main_windowDItKtH.ui'
+## Form generated from reading UI file 'main_windowdciHQD.ui'
 ##
 ## Created by: Qt User Interface Compiler version 6.10.2
 ##
@@ -168,7 +168,7 @@ class Ui_MainWindow(object):
         self.status_tab.setObjectName(u"status_tab")
         self.gridLayoutWidget = QWidget(self.status_tab)
         self.gridLayoutWidget.setObjectName(u"gridLayoutWidget")
-        self.gridLayoutWidget.setGeometry(QRect(19, 19, 601, 351))
+        self.gridLayoutWidget.setGeometry(QRect(19, 19, 441, 351))
         self.status_grid = QGridLayout(self.gridLayoutWidget)
         self.status_grid.setObjectName(u"status_grid")
         self.status_grid.setContentsMargins(0, 0, 0, 0)
@@ -193,7 +193,7 @@ class Ui_MainWindow(object):
 
         self.retranslateUi(MainWindow)
 
-        self.tabWidget.setCurrentIndex(3)
+        self.tabWidget.setCurrentIndex(0)
 
 
         QMetaObject.connectSlotsByName(MainWindow)
