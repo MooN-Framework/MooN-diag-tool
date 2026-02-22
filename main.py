@@ -4,13 +4,11 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtGui import QIntValidator, QIcon, QFont
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtWidgets import (
-    QApplication, QWidget, QGridLayout, QLabel
-)
 from main_window import Ui_MainWindow
 from util.udp_com import UdpCom, UdpListener
 from util.net_helper import *
 from util.log_parse_manager import *
+from util.node_state_manager import *
 from datetime import datetime
 
 logger = logging.getLogger("DiagnoseSwbft")
@@ -68,6 +66,7 @@ class UI(QtWidgets.QMainWindow):
         self.sock.socket_state_changed.connect(self.on_socket_state_changed)
         self.parse_log_manager = LogParseManager()
         self.parse_log_manager.detected_new_node.connect(self.on_new_node_deteced)
+        self.node_state_manager = NodeStateManager()
         # Load User Settings
         self.settings = QSettings("KW", "SwbftDiagnoseTool")
         loaded_port = self.settings.value("port","")
@@ -145,6 +144,7 @@ class UI(QtWidgets.QMainWindow):
 
     def on_new_node_deteced(self, id : int):
         self.ui.comboBox.addItem("NODE "+ str(id))
+        self.node_state_manager.add_status_row(self.ui.status_grid, id)
 
     def on_filter_combobox_changed(self):
         curr_filter_id_str = self.ui.comboBox.currentText()
