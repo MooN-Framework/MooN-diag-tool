@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 from main_window import Ui_MainWindow
 from util.udp_com import UdpCom, UdpListener
 from util.net_helper import *
-from util.log_parse_manager import LogParseManager
+from util.log_parse_manager import *
 from datetime import datetime
 
 logger = logging.getLogger("DiagnoseSwbft")
@@ -43,6 +43,8 @@ class UI(QtWidgets.QMainWindow):
             background-color: lightgray;
         }
         """)
+        # Filter combobox
+        self.ui.comboBox.currentTextChanged.connect(self.on_filter_combobox_changed)
         # Init cmd button
         self.ui.send_cmd_button.setEnabled(False)
         self.ui.send_cmd_button.clicked.connect(self.on_send_cmd_button_clicked)
@@ -65,6 +67,7 @@ class UI(QtWidgets.QMainWindow):
         self.sock = UdpCom()
         self.sock.socket_state_changed.connect(self.on_socket_state_changed)
         self.parse_log_manager = LogParseManager()
+        self.parse_log_manager.detected_new_node.connect(self.on_new_node_deteced)
         # Load User Settings
         self.settings = QSettings("KW", "SwbftDiagnoseTool")
         loaded_port = self.settings.value("port","")
@@ -140,11 +143,24 @@ class UI(QtWidgets.QMainWindow):
         self.sock.send_msg(f"MASTER:{cmd_sys_id}:InitialSync:{cmd_id}")
         self.settings.setValue("cmd_id", self.ui.cmd_lineEdit.text())
 
+    def on_new_node_deteced(self, id : int):
+        self.ui.comboBox.addItem("NODE "+ str(id))
+
+    def on_filter_combobox_changed(self):
+        curr_filter_id_str = self.ui.comboBox.currentText()
+        if curr_filter_id_str == "ALL":
+            self.parse_log_manager.set_node_filter("ALL")
+            return
+        id = int(curr_filter_id_str.split(" ")[1])
+        self.parse_log_manager.set_node_filter(id)
+        
     # ====================
     #   Helper Methods
     # ====================
     def log_to_debug_textbox(self, log: str):
         fmt_log = self.parse_log_manager.parse_generic_log(log)
+        if fmt_log is None or fmt_log == "":
+            return
         self.ui.loggingTextBox.append(fmt_log)
         doc = self.ui.loggingTextBox.document()
         while doc.blockCount() > 6000:
