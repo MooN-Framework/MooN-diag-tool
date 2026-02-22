@@ -160,7 +160,7 @@ class UI(QtWidgets.QMainWindow):
         if splitted_log[0] == "LOG":
             system_id = int(splitted_log[1])
             system_state = splitted_log[2]
-            self.node_state_manager.set_id_state(self.ui.status_grid, system_id, "State: " + system_state)
+            self.node_state_manager.set_id_state(self.ui.status_grid, system_id, system_state)
         
     # ====================
     #   Helper Methods

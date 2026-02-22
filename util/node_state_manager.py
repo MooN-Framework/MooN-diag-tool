@@ -5,14 +5,23 @@ from PySide6.QtWidgets import (
 )
 
 class LedIndicator(QLabel):
-    def __init__(self, color="red", size=16):
+    def __init__(self, color="red", size_px=16):
         super().__init__()
-        self.setFixedSize(size, size)
+        self._size = size_px
+        self.color = color
+        self.setFixedSize(self._size, self._size)
+        self.update_style()
+
+    def update_style(self):
         self.setStyleSheet(f"""
-            background-color: {color};
-            border-radius: {size // 2}px;
+            background-color: {self.color};
+            border-radius: {self._size // 2}px;
             border: 1px solid black;
         """)
+
+    def set_color(self, color: str):
+        self.color = color
+        self.update_style()
 
 class NodeStateManager:
     def __init__(self):
@@ -31,7 +40,9 @@ class NodeStateManager:
             state_label_widget.setText("State: " + state)
         
         if state_led_widget:
-            pass
+            print(state)
+            if state == "Failsafe":
+                state_led_widget.set_color("red")
 
     def add_status_row(self, grid, id):
         label = QLabel("SystemID: Node " + str(id))
