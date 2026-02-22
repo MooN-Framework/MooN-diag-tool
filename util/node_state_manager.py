@@ -19,19 +19,19 @@ class NodeStateManager:
         self.system_id_row_map : dict = {}
         self.curr_row_index = 0
     
-def set_id_state(self, grid, id: int, state: str):
-    if id not in self.system_id_row_map:
-        return
-    
-    row = self.system_id_row_map[id]
-    state_label_widget = grid.itemAtPosition(row, 1).widget()
-    state_led_widget = grid.itemAtPosition(row, 2).widget()
+    def set_id_state(self, grid, id: int, state: str):
+        if id not in self.system_id_row_map:
+            return
+        
+        row = self.system_id_row_map[id]
+        state_label_widget = grid.itemAtPosition(row, 1).widget()
+        state_led_widget = grid.itemAtPosition(row, 2).widget()
 
-    if label_widget:
-        label_widget.setText("State: " + state)
-    
-    if led_widget:
-        pass
+        if state_label_widget:
+            state_label_widget.setText("State: " + state)
+        
+        if state_led_widget:
+            pass
 
     def add_status_row(self, grid, id):
         label = QLabel("SystemID: Node " + str(id))

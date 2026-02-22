@@ -33,6 +33,7 @@ class LogParseManager(QObject):
                 fmt_log = self.parse_master_msg(splitted_log)
                 color = self.COLORS["MASTER"]
             case "SYSTEM":
+                # Ignore internal system messages from nodes
                 return ""
             case "LOG":
                 if node_id not in self.node_list:

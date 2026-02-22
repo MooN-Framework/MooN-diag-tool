@@ -119,6 +119,7 @@ class UI(QtWidgets.QMainWindow):
             self.sock.connect_socket(ip_addr, port, broadcast_addr)
             self.listener_thread = UdpListener(self.sock)
             self.listener_thread.message_received.connect(self.log_to_debug_textbox)
+            self.listener_thread.message_received.connect(self.on_msg_received_state_update)
             self.listener_thread.start()
             self.log_to_debug_textbox("Successfully connected to socket at " + ip_addr + ":" + str(port))
             self.settings.setValue("port",self.ui.portLineEdit.text())
@@ -153,6 +154,13 @@ class UI(QtWidgets.QMainWindow):
             return
         id = int(curr_filter_id_str.split(" ")[1])
         self.parse_log_manager.set_node_filter(id)
+    
+    def on_msg_received_state_update(self, msg : str):
+        splitted_log = msg.split(":")
+        if splitted_log[0] == "LOG":
+            system_id = int(splitted_log[1])
+            system_state = splitted_log[2]
+            self.node_state_manager.set_id_state(self.ui.status_grid, system_id, "State: " + system_state)
         
     # ====================
     #   Helper Methods
