@@ -40,7 +40,6 @@ class NodeStateManager:
             state_label_widget.setText("State: " + state)
         
         if state_led_widget:
-            print(state)
             if state == "Failsafe":
                 state_led_widget.set_color("red")
 

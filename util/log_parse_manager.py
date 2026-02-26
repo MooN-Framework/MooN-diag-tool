@@ -11,6 +11,7 @@ class LogParseManager(QObject):
         "ERROR": "#F44336",
         "MASTER": "#9C27B0",
         "NODE": "#333333",
+        "DIAGNOSE" : "#4CAF50",
     }
 
     def __init__(self):
@@ -21,9 +22,11 @@ class LogParseManager(QObject):
     def parse_generic_log(self, log : str) -> str:
         now = datetime.now().strftime("%H:%M:%S")
         splitted_log = log.split(":")
-        node_id = int(splitted_log[1])
+        node_id = None
+        if len(splitted_log) <= 2:
+            node_id = int(splitted_log[1])
         fmt_log = log
-        color = self.COLORS["ERROR"]
+        color = self.COLORS["DIAGNOSE"]
 
         if self.active_node_filter is not None and node_id != self.active_node_filter:
             return ""
