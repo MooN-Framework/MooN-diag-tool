@@ -5,10 +5,6 @@ class LogParseManager(QObject):
     detected_new_node = Signal(int)
 
     COLORS = {
-        "INFO": "#2196F3",
-        "SUCCESS": "#4CAF50",
-        "WARNING": "#FFC107",
-        "ERROR": "#F44336",
         "MASTER": "#9C27B0",
         "NODE": "#333333",
         "DIAGNOSE" : "#4CAF50",
@@ -55,12 +51,6 @@ class LogParseManager(QObject):
 
     def parse_master_msg(self, splitted_log: str) -> str:
         return "[MASTER] To [NODE" + splitted_log[1]  + "] Execute " + self.int_to_cmd_str(int(splitted_log[3]))
-
-    def parse_system_msg(self, splitted_log) -> str:
-        if len(splitted_log) == 3:
-            return "[NODE" + splitted_log[1] + "] [" + splitted_log[2] + "]"
-        elif len(splitted_log) == 4:
-            return "[NODE" + splitted_log[1] + "] [" + splitted_log[2] + "] Value(" + hex(int(splitted_log[3])) + ")" 
         
     def parse_system_log(self, splitted_log: str) -> str:
         return "[NODE" + splitted_log[1] + "] [" + splitted_log[2] + "] " + splitted_log[3]
