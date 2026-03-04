@@ -316,7 +316,7 @@ li.checked::marker { content: &quot;\2612&quot;; }
      <widget class="QPushButton" name="send_cmd_button">
       <property name="geometry">
        <rect>
-        <x>420</x>
+        <x>450</x>
         <y>30</y>
         <width>141</width>
         <height>31</height>
@@ -336,7 +336,7 @@ li.checked::marker { content: &quot;\2612&quot;; }
        <rect>
         <x>101</x>
         <y>30</y>
-        <width>171</width>
+        <width>201</width>
         <height>31</height>
        </rect>
       </property>
@@ -358,6 +358,16 @@ li.checked::marker { content: &quot;\2612&quot;; }
       <item>
        <property name="text">
         <string>Induce CRC fault</string>
+       </property>
+      </item>
+      <item>
+       <property name="text">
+        <string>Disable receiv sys msg</string>
+       </property>
+      </item>
+      <item>
+       <property name="text">
+        <string>Disable send sys msg</string>
        </property>
       </item>
      </widget>
@@ -382,7 +392,7 @@ li.checked::marker { content: &quot;\2612&quot;; }
      <widget class="QLabel" name="label_8">
       <property name="geometry">
        <rect>
-        <x>280</x>
+        <x>310</x>
         <y>30</y>
         <width>91</width>
         <height>31</height>
@@ -400,7 +410,7 @@ li.checked::marker { content: &quot;\2612&quot;; }
      <widget class="QLineEdit" name="cmd_lineEdit">
       <property name="geometry">
        <rect>
-        <x>372</x>
+        <x>402</x>
         <y>34</y>
         <width>41</width>
         <height>21</height>

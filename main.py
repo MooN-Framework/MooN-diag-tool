@@ -191,6 +191,10 @@ class UI(QtWidgets.QMainWindow):
                 cmd_id = 1
             case "Induce Voting fault":
                 cmd_id = 2
+            case "Disable receiv sys msg":
+                cmd_id = 3
+            case "Disable send sys msg":
+                cmd_id = 4
         return cmd_id
 
 if __name__ == "__main__":

@@ -69,4 +69,10 @@ class LogParseManager(QObject):
                 cmd_str = "Induce CRC fault"
             case 2:
                 cmd_str = "Induce Voting fault"
+            case 3:
+                cmd_str = "Disable receiv sys msg"
+            case 4:
+                cmd_str = "Disable send sys msg"
+            case 5:
+                cmd_str = "Another node send node to failsafe"
         return cmd_str
