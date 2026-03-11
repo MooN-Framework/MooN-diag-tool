@@ -42,7 +42,11 @@ class NodeStateManager:
         if state_led_widget:
             if state == "Failsafe":
                 state_led_widget.set_color("red")
-
+            elif state == "Error Handling":
+                state_led_widget.set_color("yellow")
+            else:
+                state_led_widget.set_color("green")
+                
     def add_status_row(self, grid, id):
         label = QLabel("SystemID: Node " + str(id))
         label2 = QLabel("State:")
