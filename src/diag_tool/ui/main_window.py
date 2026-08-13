@@ -23,6 +23,7 @@ from .logging_tab import LoggingTab
 from .settings_tab import SettingsTab
 from .status_tab import StatusTab
 from .test_tab import TestTab
+from .timing_tab import TimingTab
 from .signals import Bus
 
 
@@ -53,6 +54,10 @@ class MainWindow(QMainWindow):
         self.inject_tab = InjectTab(self.registry, lambda: self.diag)
         self.logging_tab = LoggingTab(self.session_logger)
         self.test_tab = TestTab(lambda: self.settings)
+        self.timing_tab = TimingTab(
+            settings_provider=lambda: self.settings,
+            settings_saver=self._apply_settings,
+        )
         self.settings_tab = SettingsTab(self.settings)
         self.settings_tab.settings_applied.connect(self._apply_settings)
 
@@ -60,6 +65,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.inject_tab, "Inject")
         self.tabs.addTab(self.logging_tab, "Log")
         self.tabs.addTab(self.test_tab, "Tests")
+        self.tabs.addTab(self.timing_tab, "Timing")
         self.tabs.addTab(self.settings_tab, "Settings")
 
         # Wire the Bus into the tabs

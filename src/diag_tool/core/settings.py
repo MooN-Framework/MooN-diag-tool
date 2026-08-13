@@ -29,6 +29,12 @@ class AppSettings:
     scenarios_path: str = ""          # for the test tab
     # Test mode
     test_mode: str = "simulated"      # "simulated" | "hardware"
+    # Cross-compile
+    target_triple: str = ""           # empty = host triple
+    binary_name: str = "node"
+    build_features: str = ""          # comma-separated
+    # Hardware nodes: JSON-encoded list of HardwareNode dicts.
+    hardware_nodes_json: str = "[]"
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
