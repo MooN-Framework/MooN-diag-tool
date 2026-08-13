@@ -1,143 +1,166 @@
-"""MainWindow — Tabs für Monitor, Injection, Log, Einstellungen."""
-
+"""
+Main window: owns the core objects (DiagClient, OperationalListener,
+Registry, SessionLogger) and the tabs. Handles reconnect logic when
+settings change.
+"""
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings, Qt, Slot
-from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (
-    QLabel,
-    QMainWindow,
-    QMessageBox,
-    QStatusBar,
-    QTabWidget,
-)
+from pathlib import Path
+from typing import Optional
 
-from diag_tool.config import AppConfig
-from diag_tool.core.session import Session
-from diag_tool.ui.inject_view import InjectView
-from diag_tool.ui.log_view import LogView
-from diag_tool.ui.monitor_view import MonitorView
-from diag_tool.ui.settings_dialog import SettingsDialog
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QMainWindow, QStatusBar, QTabWidget
+
+from ..core.diag_client import DiagClient, DiagTelegram
+from ..core.node_registry import NodeRegistry
+from ..core.operational_listener import OperationalListener
+from ..core.session_logger import SessionLogger
+from ..core.settings import AppSettings, load_from_qsettings, save_to_qsettings
+from ..core.wire_decoder import DecodedFrame
+
+from .inject_tab import InjectTab
+from .logging_tab import LoggingTab
+from .settings_tab import SettingsTab
+from .status_tab import StatusTab
+from .test_tab import TestTab
+from .signals import Bus
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self._config = config
-        self._session = Session(config)
+        self.setWindowTitle("2oo3 Diagnostic Tool")
+        self.resize(1200, 800)
+        self.setStatusBar(QStatusBar())
 
-        self.setWindowTitle("2oo3 Diagnose-Tool")
+        self.qsettings = QSettings("2oo3-framework", "diag-tool")
+        self.settings: AppSettings = load_from_qsettings(self.qsettings)
 
-        self._tabs = QTabWidget()
-        self._tabs.setDocumentMode(True)
+        # Core objects (no Qt dependency)
+        self.registry = NodeRegistry()
+        self.session_logger = SessionLogger(Path(self.settings.session_log_dir))
+        self.diag: Optional[DiagClient] = None
+        self.op_listener: Optional[OperationalListener] = None
 
-        self._monitor = MonitorView()
-        self._inject = InjectView()
-        self._log = LogView()
+        # Bus translates thread callbacks to Qt signals
+        self.bus = Bus()
 
-        self._tabs.addTab(self._monitor, "Monitor")
-        self._tabs.addTab(self._inject, "Fault Injection")
-        self._tabs.addTab(self._log, "Session-Log")
+        # Tabs
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
 
-        self.setCentralWidget(self._tabs)
+        self.status_tab = StatusTab(self.registry, lambda: self.diag)
+        self.inject_tab = InjectTab(self.registry, lambda: self.diag)
+        self.logging_tab = LoggingTab(self.session_logger)
+        self.test_tab = TestTab(lambda: self.settings)
+        self.settings_tab = SettingsTab(self.settings)
+        self.settings_tab.settings_applied.connect(self._apply_settings)
 
-        # Statusbar
-        self._status_label = QLabel("Bereit")
-        self._log_path_label = QLabel("")
-        status: QStatusBar = self.statusBar()
-        status.addWidget(self._status_label, 1)
-        status.addPermanentWidget(self._log_path_label)
+        self.tabs.addTab(self.status_tab, "Status")
+        self.tabs.addTab(self.inject_tab, "Inject")
+        self.tabs.addTab(self.logging_tab, "Log")
+        self.tabs.addTab(self.test_tab, "Tests")
+        self.tabs.addTab(self.settings_tab, "Settings")
 
-        self._build_menu()
-        self._wire_session()
-        self._restore_geometry()
+        # Wire the Bus into the tabs
+        self.bus.op_frame.connect(self.logging_tab.on_op_frame)
+        self.bus.diag_telegram.connect(self.logging_tab.on_diag_telegram)
 
-    # ------------------------------------------------------------------ Menü
-    def _build_menu(self) -> None:
-        file_menu = self.menuBar().addMenu("&Datei")
+        # Bring up the listeners
+        self._connect_all()
 
-        act_start = QAction("Session &starten", self)
-        act_start.setShortcut(QKeySequence("Ctrl+R"))
-        act_start.triggered.connect(self._start_session)
-        file_menu.addAction(act_start)
+    # ---- connect / disconnect --------------------------------------------
 
-        act_stop = QAction("Session &beenden", self)
-        act_stop.setShortcut(QKeySequence("Ctrl+Shift+R"))
-        act_stop.triggered.connect(self._stop_session)
-        file_menu.addAction(act_stop)
+    def _connect_all(self) -> None:
+        self._disconnect_all()
+        s = self.settings
 
-        file_menu.addSeparator()
-
-        act_settings = QAction("&Einstellungen…", self)
-        act_settings.setShortcut(QKeySequence.StandardKey.Preferences)
-        act_settings.triggered.connect(self._open_settings)
-        file_menu.addAction(act_settings)
-
-        file_menu.addSeparator()
-
-        act_quit = QAction("&Beenden", self)
-        act_quit.setShortcut(QKeySequence.StandardKey.Quit)
-        act_quit.triggered.connect(self.close)
-        file_menu.addAction(act_quit)
-
-    # ------------------------------------------------------------------ Session
-    def _wire_session(self) -> None:
-        self._session.system_frame.connect(self._monitor.on_system_frame)
-        self._session.diagnose_frame.connect(self._log.append_rx_frame)
-        self._session.error.connect(self._on_error)
-        self._session.log_path_changed.connect(self._on_log_path)
-        self._inject.send_requested.connect(self._session.send_diagnose_frame)
-
-    @Slot()
-    def _start_session(self) -> None:
-        self._session.start()
-        self._status_label.setText("Session läuft")
-
-    @Slot()
-    def _stop_session(self) -> None:
-        self._session.stop()
-        self._status_label.setText("Session beendet")
-
-    @Slot(str)
-    def _on_error(self, msg: str) -> None:
-        self._status_label.setText(f"Fehler: {msg}")
-
-    @Slot(str)
-    def _on_log_path(self, path: str) -> None:
-        self._log_path_label.setText(f"Log: {path}")
-
-    # ------------------------------------------------------------------ Settings
-    @Slot()
-    def _open_settings(self) -> None:
-        dlg = SettingsDialog(self._config, self)
-        if dlg.exec() == SettingsDialog.DialogCode.Accepted:
-            QMessageBox.information(
-                self,
-                "Einstellungen",
-                "Änderungen greifen nach Neustart der Session.",
+        try:
+            self.diag = DiagClient(
+                multicast_group=s.diag_group,
+                port=s.diag_port,
+                interface_ip=s.interface_ip,
             )
+            self.diag.add_listener(self._on_diag)
+            self.diag.start()
+        except OSError as e:
+            self.statusBar().showMessage(f"Diag client error: {e}", 5000)
+            self.diag = None
 
-    # ------------------------------------------------------------------ Geometry
-    def _restore_geometry(self) -> None:
-        s = QSettings("diag-tool", "diag-tool")
-        geom = s.value("mainwindow/geometry")
-        if geom is not None:
-            self.restoreGeometry(geom)  # type: ignore[arg-type]
-        else:
-            # Default: 80% des verfügbaren Screens
-            screen = self.screen()
-            if screen is not None:
-                avail = screen.availableGeometry()
-                self.resize(int(avail.width() * 0.8), int(avail.height() * 0.8))
-                self.move(
-                    avail.x() + (avail.width() - self.width()) // 2,
-                    avail.y() + (avail.height() - self.height()) // 2,
+        try:
+            self.op_listener = OperationalListener(
+                multicast_group=s.op_group,
+                port=s.op_port,
+                interface_ip=s.interface_ip,
+            )
+            self.op_listener.add_listener(self._on_op_frame)
+            self.op_listener.start()
+        except OSError as e:
+            self.statusBar().showMessage(f"Operational listener error: {e}", 5000)
+            self.op_listener = None
+
+        self.statusBar().showMessage(
+            f"Diag: {s.diag_group}:{s.diag_port}  |  "
+            f"Op: {s.op_group}:{s.op_port}  |  iface: {s.interface_ip}",
+            0,
+        )
+
+    def _disconnect_all(self) -> None:
+        if self.diag is not None:
+            self.diag.stop()
+            self.diag = None
+        if self.op_listener is not None:
+            self.op_listener.stop()
+            self.op_listener = None
+
+    def _apply_settings(self, new_settings: AppSettings) -> None:
+        self.settings = new_settings
+        save_to_qsettings(self.qsettings, new_settings)
+        # Reanchor the session logger (base dir may have changed)
+        was_active = self.session_logger.is_active()
+        if was_active:
+            self.session_logger.stop()
+        self.session_logger.base_dir = Path(new_settings.session_log_dir)
+        if was_active:
+            self.session_logger.start()
+        self._connect_all()
+
+    # ---- callbacks from core (worker threads!) ---------------------------
+
+    def _on_op_frame(self, frame: DecodedFrame, ts_mono: float) -> None:
+        # Update registry (thread-safe)
+        if frame.error is None or frame.crc_ok:
+            self.registry.observe_operational(
+                frame.node_id, frame.node_state_wire, frame.node_state_name,
+                frame.seq_num, frame.session_id,
+            )
+        # Session log (internally thread-safe)
+        if self.session_logger.is_active():
+            self.session_logger.log_operational(frame, ts_mono)
+        # Emit through the Bus (queued to the UI thread)
+        self.bus.op_frame.emit(frame, ts_mono)
+
+    def _on_diag(self, tel: DiagTelegram) -> None:
+        # Status responses feed the registry (even if we didn't request them
+        # ourselves -- every piece of info helps the overview).
+        if tel.kind == "status" and tel.source_node_id is not None:
+            data = tel.raw.get("data") or {}
+            self.registry.observe_diag_status(tel.source_node_id, data)
+        elif tel.source_node_id is not None:
+            # For staged/error we only register "this node is alive".
+            v = self.registry.get(tel.source_node_id)
+            if v is None:
+                self.registry.observe_operational(
+                    tel.source_node_id, 0, "?", 0, 0,
                 )
+        if self.session_logger.is_active():
+            self.session_logger.log_diag(tel.raw, tel.ts_mono)
+        self.bus.diag_telegram.emit(tel)
 
-    def closeEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802
-        s = QSettings("diag-tool", "diag-tool")
-        s.setValue("mainwindow/geometry", self.saveGeometry())
-        self._session.stop()
+    # ---- cleanup ---------------------------------------------------------
+
+    def closeEvent(self, event) -> None:
+        self._disconnect_all()
+        if self.session_logger.is_active():
+            self.session_logger.stop()
         super().closeEvent(event)
-        # Qt.WA_DeleteOnClose nicht nötig — MainWindow lebt bis QApp.exec zurückkehrt
-        _ = Qt.WA_DeleteOnClose  # silence unused import if refactored
