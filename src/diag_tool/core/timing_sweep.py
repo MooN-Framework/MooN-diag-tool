@@ -25,11 +25,35 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from .config_gen import NodeSpec, make_spec, render_to_file, render_toml
 from .diag_client import DiagClient
 from .operational_listener import OperationalListener
 from .ssh_deploy import HardwareNode, SshError, scp_bytes, scp_file, ssh_exec
 from .timing_measure import CycleMeasurement
+
+# The test harness lives alongside the diag tool in the same repo now,
+# so we can reuse its config generation directly.
+from harness.config_gen import make_spec, render_config
+
+
+def render_config_to_str(spec) -> str:
+    """
+    Render a NodeSpec to a TOML string (no file). The harness's
+    render_config only writes to disk; for SCP-to-hardware we want
+    just the bytes. We reuse render_config via a tempfile to avoid
+    duplicating the template.
+    """
+    import tempfile
+    from pathlib import Path as _Path
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as tmp:
+        tmp_path = _Path(tmp.name)
+    try:
+        render_config(spec, tmp_path)
+        return tmp_path.read_text()
+    finally:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
 
 
 VERDICT_STABLE = "STABLE"
@@ -151,13 +175,30 @@ class TimingSweep:
                 diag.stop()
 
             if not operational:
+                # Surface WHY the nodes did not come up — tail their
+                # stdout log files (sim mode only; hardware users have
+                # to check remote logs themselves).
+                detail_lines: list[str] = []
+                if self.mode == "simulated" and self.p.local_work_dir is not None:
+                    log_dir = self.p.local_work_dir / f"cycle_{cycle_ms}ms" / "logs"
+                    for lp in sorted(log_dir.glob("node_*.log")):
+                        try:
+                            tail = lp.read_text(errors="replace").splitlines()[-8:]
+                        except OSError:
+                            continue
+                        detail_lines.append(f"--- {lp.name} (tail) ---")
+                        detail_lines.extend(tail)
+                if detail_lines:
+                    for ln in detail_lines:
+                        self.on_line(ln)
                 return CandidateResult(
                     cycle_ms=cycle_ms, operational=False,
                     n_cycles=0, mean_us=0, overrun_frac=1.0,
                     worst_overrun_us=0, verdict=VERDICT_NO_OP,
-                    detail=f"only {len(expected_ids)} nodes expected, "
-                           f"not all reached operational in "
-                           f"{self.p.setup_timeout_s}s",
+                    detail=(f"only {len(expected_ids)} nodes expected, "
+                            f"not all reached operational in "
+                            f"{self.p.setup_timeout_s}s "
+                            f"(see log for node stdout tails)"),
                 )
 
             # --- 3. measure ----------------------------------------------
@@ -211,22 +252,51 @@ class TimingSweep:
 
     def _wait_operational(self, diag: DiagClient, ids: list[int],
                           timeout: float) -> bool:
+        """
+        Poll get_status on all expected nodes. A node counts as operational
+        as soon as its diag channel answers with any state other than
+        Startup/InitSync (i.e. it has finished coming up). We probe all
+        ids in parallel each round so a slow node doesn't serialise the
+        others.
+        """
         deadline = time.monotonic() + timeout
+        ready: set[int] = set()
         while time.monotonic() < deadline:
             if self._cancel.is_set():
                 return False
-            ok = 0
-            for nid in ids:
-                status = diag.get_status(nid, timeout=0.5)
-                if status is None:
-                    continue
-                state = status.get("node_state", "")
-                if state in ("ReadInputs", "ShareInputs", "ShareResult",
-                             "SendAck", "PublishResult", "CycleSync"):
-                    ok += 1
-            if ok >= len(ids):
+            missing = [nid for nid in ids if nid not in ready]
+            if not missing:
                 return True
-            time.sleep(0.5)
+
+            results: dict[int, Optional[dict]] = {}
+            lock = threading.Lock()
+
+            def probe(nid: int) -> None:
+                st = diag.get_status(nid, timeout=0.8)
+                with lock:
+                    results[nid] = st
+
+            threads = [threading.Thread(target=probe, args=(nid,), daemon=True)
+                       for nid in missing]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=1.5)
+
+            for nid, st in results.items():
+                if st is None:
+                    continue
+                state = st.get("node_state", "")
+                if state and state not in ("Startup", "InitSync"):
+                    ready.add(nid)
+
+            self.on_line(
+                f"[wait_operational] ready={sorted(ready)} "
+                f"missing={sorted(set(ids) - ready)}"
+            )
+            if len(ready) >= len(ids):
+                return True
+            time.sleep(0.3)
         return False
 
     def _expected_node_ids(self) -> list[int]:
@@ -258,15 +328,25 @@ class TimingSweep:
                 diag_port=self.p.diag_port,
                 interface="lo",
             )
-            cfg_path = render_to_file(spec, cfg_dir / f"node_{own_id}.toml")
+            cfg_path = render_config(spec, cfg_dir / f"node_{own_id}.toml")
             log_path = log_dir / f"node_{own_id}.log"
             log_fh = log_path.open("w")
+            # Mirror what the harness (harness/node.py) does: the binary
+            # takes a "node" subcommand and reads its config via --config.
+            # RUST_LOG/NO_COLOR match the harness defaults.
+            env = os.environ.copy()
+            env.setdefault("RUST_LOG", "info")
+            env["NO_COLOR"] = "1"
+            cmd = [str(self.p.local_binary), "node", "--config", str(cfg_path)]
             p = subprocess.Popen(
-                [str(self.p.local_binary), "--config", str(cfg_path)],
+                cmd, env=env,
                 stdout=log_fh, stderr=subprocess.STDOUT,
             )
             self._local_procs.append(p)
-        self.on_line(f"spawned {len(self._local_procs)} local nodes")
+        self.on_line(
+            f"spawned {len(self._local_procs)} local nodes "
+            f"(cfg={cfg_dir}, logs={log_dir})"
+        )
 
     def _sim_stop(self) -> None:
         for p in self._local_procs:
@@ -304,7 +384,7 @@ class TimingSweep:
                 diag_port=self.p.diag_port,
                 interface="lo",  # node's own view; hardware uses eth by config
             )
-            toml_text = render_toml(spec)
+            toml_text = render_config_to_str(spec)
             self.on_line(f"[{hn.host}] deploying config → {hn.remote_config}")
             scp_bytes(hn, toml_text.encode(), hn.remote_config)
             # stop first (best-effort, ignore failures), then start

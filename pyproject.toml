@@ -1,13 +1,12 @@
 [project]
 name = "diag-tool"
 version = "0.1.0"
-description = "Diagnose-GUI für das 2oo3-Voting-Framework"
+description = "Diagnostic GUI and test framework for the 2oo3 voting system"
 requires-python = ">=3.11"
 dependencies = [
     "PySide6>=6.7",
-    "tomli>=2.0; python_version<'3.11'",
-    "pytest>=7",
-]
+	"pytest>=7",
+]	
 
 [project.scripts]
 diag-tool = "diag_tool.app:main"
@@ -17,4 +16,6 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/diag_tool"]
+# Two top-level packages: the GUI (diag_tool) and the reusable test
+# harness (harness). Tests under tests/ import the latter directly.
+packages = ["src/diag_tool", "src/harness"]

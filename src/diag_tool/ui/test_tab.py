@@ -212,12 +212,23 @@ class TestTab(QWidget):
         split.setStretchFactor(1, 3)
         outer.addWidget(split, 1)
 
+    def _repo_root(self) -> Path:
+        # __file__ = <repo>/src/diag_tool/ui/test_tab.py -> parents[3] = <repo>
+        return Path(__file__).resolve().parents[3]
+
     def _scenarios_dir(self) -> Optional[Path]:
+        # Prefer the in-repo tests/scenarios — since the harness lives
+        # in this repo now, that's the canonical location. Only fall back
+        # to a user-configured path if the in-repo one is missing (e.g.
+        # someone reorganised the tree).
+        in_repo = self._repo_root() / "tests" / "scenarios"
+        if in_repo.is_dir():
+            return in_repo
         s = self._get_settings()
-        if not s.scenarios_path:
-            return None
-        p = Path(s.scenarios_path)
-        return p if p.is_dir() else None
+        if s.scenarios_path:
+            p = Path(s.scenarios_path)
+            return p if p.is_dir() else None
+        return None
 
     def _reload_scenarios(self) -> None:
         d = self._scenarios_dir()
@@ -248,7 +259,19 @@ class TestTab(QWidget):
                     if self.scenarios_list.item(i).isSelected()]
 
         cmd = [sys.executable, "-m", "pytest"]
+        # Force our own pytest.ini + conftest so we never accidentally
+        # pick up a stale one that happens to sit next to whatever test
+        # path the user selected (e.g. an older copy in the Rust repo).
+        repo_root = self._repo_root()
+        pytest_ini = repo_root / "pytest.ini"
+        if pytest_ini.exists():
+            cmd += ["-c", str(pytest_ini)]
         cmd += shlex.split(self.extra_args.text() or "")
+
+        # Always pass --rust-repo when configured so the conftest's
+        # `binary` fixture knows where to run cargo build.
+        if s.rust_repo_path:
+            cmd.append(f"--rust-repo={s.rust_repo_path}")
 
         if self.mode.currentText() == "hardware":
             cmd += [
@@ -261,7 +284,7 @@ class TestTab(QWidget):
             ]
 
         cmd += selected if selected else [str(d)]
-        repo_root = d.parent
+        # cwd is the diag_tool repo root (same as -c's directory).
 
         env = os.environ.copy()
         for line in self.env_edit.toPlainText().splitlines():

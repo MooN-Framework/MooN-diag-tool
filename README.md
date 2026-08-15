@@ -1,69 +1,96 @@
-# 2oo3 Diagnostic Tool
+# 2oo3 Diagnostic Tool + Test Framework
 
-PySide6 GUI for the SIL-2 2oo3 voting framework: live monitoring,
-fault injection, session logging, and a test runner (simulated and
-real hardware).
+Single repository containing both the diagnostic PySide6 GUI and the
+pytest-based test framework for the SIL-2 2oo3 voting system.
 
-## Setup with uv
+## Repo layout
+
+```
+.
+├── pyproject.toml         # uv-managed, installs both packages
+├── pytest.ini             # markers, testpaths=tests, pythonpath=src
+├── conftest.py            # session fixtures (--rust-repo, --fabric=...)
+├── src/
+│   ├── diag_tool/         # PySide6 GUI package
+│   └── harness/           # reusable test harness (Fabric, Node, DiagClient, ...)
+├── tests/
+│   ├── scenarios/         # scenario tests (test_t01 .. test_t19)
+│   └── timing_analysis/   # standalone timing studies (T20)
+└── docs/
+```
+
+The GUI and the test harness share the same repo so:
+- the timing sweep in the GUI can reuse `harness.config_gen.make_spec`
+  and generate the exact same TOML the tests use,
+- the Test tab in the GUI can launch pytest against `tests/scenarios/`
+  without any path juggling,
+- future refactors of the wire format touch one place instead of two.
+
+The Rust node source stays in its own repo. Point at it via the
+`--rust-repo=PATH` option to pytest (or set `RUST_REPO` in the
+environment); the GUI reads it from the "Rust repository" setting in
+Settings.
+
+## Setup
 
 ```bash
 uv sync
-uv run diag-tool
+uv run diag-tool          # launch GUI
 ```
 
-## Without uv
+Or without uv:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+python -m venv .venv && source .venv/bin/activate
+pip install -e '.[tests]'
 diag-tool
 ```
 
-## Or run directly
+## Running the tests
 
 ```bash
-pip install PySide6
-PYTHONPATH=src python -m diag_tool.app
+# simulated (cargo build + local subprocess nodes)
+pytest --rust-repo=../voting-node
+
+# hardware (SSH-restart of already-installed nodes)
+pytest --fabric=hardware \
+       --diag-group=239.10.0.2 --diag-port=6666 \
+       --op-group=239.10.0.1 --op-port=5555 \
+       --interface-ip=192.168.1.1
+
+# just the timing sweep
+pytest -m timing --rust-repo=../voting-node
 ```
 
-## Tabs
+The GUI's **Tests** tab wraps all of this: pick a mode, pick
+scenarios, click Start.
+
+## GUI tabs
 
 | Tab      | Purpose                                                                       |
 |----------|-------------------------------------------------------------------------------|
 | Status   | Live overview of all discovered nodes (state, seq, peers, frame count)        |
 | Inject   | Injection commands with multi-target selection and a preset menu for the tests|
 | Log      | Live feed of all telegrams (op + diag), filters, optional JSONL session log   |
-| Tests    | pytest runner against `scenarios/`, modes `simulated` / `hardware`            |
+| Tests    | pytest runner against `tests/scenarios/`, modes `simulated` / `hardware`      |
+| Timing   | Cycle-duration sweep with cross-compile + SSH deploy, on host or hardware     |
 | Settings | Multicast config, paths, test mode                                            |
 
-## Architecture
+### Timing tab
 
-- `core/wire_decoder.py` — binary frames (23-byte header + CRC32)
-- `core/diag_client.py` — JSON diag client, sender + rx thread
-- `core/operational_listener.py` — passive binary listener
-- `core/node_registry.py` — thread-safe auto-discovery
-- `core/session_logger.py` — JSONL per session
-- `core/settings.py` — persistent application state
-- `ui/main_window.py` — wires everything, reconnects on settings change
-- `ui/*_tab.py` — tabs, each independently testable
+Runs a descending sweep over `cycle_duration_ms` candidates. For each
+candidate the tool spins the fabric up (locally or via SSH), waits for
+operational via diag, measures STATE-frame inter-arrival times for a
+configurable window, and grades the result STABLE / TOO_MANY_OVERRUNS
+/ NO_OPERATIONAL / NODE_DIED. Measurement is purely passive on the
+operational multicast — no log parsing.
 
-Nodes are discovered at runtime — the node count is not hard-coded
-anywhere. Both operational frames (each carrying its `node_id`) and
-diag replies (`source_node_id`) populate the registry.
+The tab also has a cross-compile panel (`cargo build --release
+--target=<triple>`) and a "Deploy to all hardware nodes" button that
+SCPs the produced binary to each configured node. Hardware nodes are
+edited in the "Configure hardware nodes…" dialog and persisted in the
+app settings.
 
-## Hardware mode
-
-See [`docs/harness_hardware.md`](docs/harness_hardware.md) for the
-one-time `conftest.py` patch that enables `--fabric=hardware`. The
-tool then calls pytest with the multicast parameters from Settings,
-without spawning nodes locally.
-
-## Ideas for later
-
-- Timeline widget on the Status tab (state transitions per node as
-  colour stripes)
-- Diff view between two get_status snapshots
-- Result payload decoder (currently just a hex dump for RESULT frames)
-- CRC error counter per node in the status table
-- Export of the log buffer as CSV
+SSH uses the system `ssh` and `scp` binaries with `BatchMode=yes`, so
+key-based authentication is required — set up ssh-agent or point at a
+key file in the node config.

@@ -25,14 +25,15 @@ class AppSettings:
     interface_ip: str = "127.0.0.1"
     # Paths
     session_log_dir: str = str(Path.home() / "diag-tool-sessions")
-    rust_repo_path: str = ""          # for sim mode / cargo build
-    scenarios_path: str = ""          # for the test tab
+    rust_repo_path: str = ""          # location of the Rust node repo (for cargo build)
+    # Empty by default -> the Test tab falls back to <this_repo>/tests/scenarios.
+    scenarios_path: str = ""
     # Test mode
     test_mode: str = "simulated"      # "simulated" | "hardware"
     # Cross-compile
     target_triple: str = ""           # empty = host triple
     binary_name: str = "node"
-    build_features: str = ""          # comma-separated
+    build_features: str = "diagnostic"  # required for the JSON diag channel
     # Hardware nodes: JSON-encoded list of HardwareNode dicts.
     hardware_nodes_json: str = "[]"
 

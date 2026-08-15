@@ -60,10 +60,8 @@ class SettingsTab(QWidget):
         pf = QFormLayout(paths); pf.setContentsMargins(12, 20, 12, 12); pf.setSpacing(10)
         self.session_dir = QLineEdit(s.session_log_dir)
         self.rust_repo = QLineEdit(s.rust_repo_path)
-        self.scenarios = QLineEdit(s.scenarios_path)
         pf.addRow("Session logs", self._with_browse(self.session_dir))
         pf.addRow("Rust repository", self._with_browse(self.rust_repo))
-        pf.addRow("Scenarios directory", self._with_browse(self.scenarios))
         outer.addWidget(paths)
 
         # Test mode
@@ -119,7 +117,7 @@ class SettingsTab(QWidget):
             interface_ip=self.iface.text().strip(),
             session_log_dir=self.session_dir.text().strip(),
             rust_repo_path=self.rust_repo.text().strip(),
-            scenarios_path=self.scenarios.text().strip(),
+            scenarios_path="",  # obsolete: tests live in this repo now
             test_mode=self.test_mode.currentText(),
         )
         self.settings_applied.emit(s)
