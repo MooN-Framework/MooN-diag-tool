@@ -32,28 +32,12 @@ from .timing_measure import CycleMeasurement
 
 # The test harness lives alongside the diag tool in the same repo now,
 # so we can reuse its config generation directly.
-from harness.config_gen import make_spec, render_config
+from harness.config_gen import make_spec, render_config, render_toml_str
 
 
 def render_config_to_str(spec) -> str:
-    """
-    Render a NodeSpec to a TOML string (no file). The harness's
-    render_config only writes to disk; for SCP-to-hardware we want
-    just the bytes. We reuse render_config via a tempfile to avoid
-    duplicating the template.
-    """
-    import tempfile
-    from pathlib import Path as _Path
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as tmp:
-        tmp_path = _Path(tmp.name)
-    try:
-        render_config(spec, tmp_path)
-        return tmp_path.read_text()
-    finally:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
+    """Backwards-compatible alias for the SCP-to-hardware path."""
+    return render_toml_str(spec)
 
 
 VERDICT_STABLE = "STABLE"
@@ -71,6 +55,7 @@ class SweepParams:
     measure_s: float
     setup_timeout_s: float
     max_overrun_fraction: float
+    overrun_tolerance_pct: float
     diag_group: str
     diag_port: int
     op_group: str
@@ -152,7 +137,10 @@ class TimingSweep:
         )
         listener.start()
         try:
-            meas = CycleMeasurement(target_cycle_ms=cycle_ms)
+            meas = CycleMeasurement(
+                target_cycle_ms=cycle_ms,
+                overrun_tolerance_pct=self.p.overrun_tolerance_pct,
+            )
             meas.attach(listener)
 
             if self.mode == "simulated":

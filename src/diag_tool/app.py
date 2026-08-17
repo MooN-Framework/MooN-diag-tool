@@ -11,7 +11,7 @@ from .ui import style
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("2oo3 Diagnostic Tool")
+    app.setApplicationName("MooN framework diagnostic tool")
     app.setOrganizationName("2oo3-framework")
     style.apply(app)
     w = MainWindow()

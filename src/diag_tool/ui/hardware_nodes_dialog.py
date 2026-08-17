@@ -62,6 +62,24 @@ class HardwareNodesDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(False)
         self.table.verticalHeader().setVisible(False)
+        # Give rows enough vertical room so the inline editor doesn't
+        # squash into an unreadable slit when a cell is double-clicked.
+        self.table.verticalHeader().setDefaultSectionSize(34)
+        # Reasonable initial column widths — user can still drag them.
+        col_widths = {
+            0: 50,   # ID
+            1: 150,  # Host
+            2: 80,   # User
+            3: 60,   # Port
+            4: 180,  # Key path
+            5: 180,  # Remote binary
+            6: 180,  # Remote config
+            7: 220,  # Start cmd
+            8: 220,  # Stop cmd
+            9: 160,  # Status
+        }
+        for col, w in col_widths.items():
+            self.table.setColumnWidth(col, w)
         outer.addWidget(self.table, 1)
 
         for n in nodes:

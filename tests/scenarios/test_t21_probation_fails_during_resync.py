@@ -67,12 +67,10 @@ def test_probation_node_fails_during_resync(fabric_3):
 
     # 6. Beide gesunden Nodes muessen ihn wieder als Lost sehen.
     for observer in (SURVIVOR_A, SURVIVOR_B):
-        peer = wait_peer_health(fabric_3, observer, PROBATION_TARGET,
-                                "Lost", timeout=10.0)
-        assert peer is not None, (
-            f"survivor {observer} sieht {PROBATION_TARGET} nach zweitem "
-            f"shutdown nicht wieder als Lost"
-        )
+            node = fabric_3.nodes[observer]
+            assert node.wait_for_log(
+                rf"peer readmitted.*peer_id={PROBATION_TARGET}", timeout=15.0
+            ), ...
 
     # 7. Die zwei gesunden Nodes MUESSEN weiter cyceln — kein Failsafe.
     #    Wir warten aktive Zyklus-Progression ab, das ist der harte

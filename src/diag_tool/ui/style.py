@@ -299,6 +299,18 @@ QSplitter::handle:horizontal {{ width: 3px; }}
 QSplitter::handle:vertical {{ height: 3px; }}
 QSplitter::handle:hover {{ background-color: {ACCENT}; }}
 
+/* ---- Inline editors inside item views ---- */
+/* When a user double-clicks a QTableWidget cell, Qt inserts a
+   QLineEdit as an inline editor. The global QLineEdit padding above
+   (6px 8px) makes that editor unreadable inside default-height rows —
+   text vanishes into the padding. Tighten it here. */
+QAbstractItemView QLineEdit {{
+    padding: 2px 4px;
+    border-radius: 3px;
+    border: 1px solid {ACCENT};
+    background-color: {BG_INPUT};
+}}
+
 /* ---- Message Box ---- */
 QMessageBox {{
     background-color: {BG_ELEVATED};

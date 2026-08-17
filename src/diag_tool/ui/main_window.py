@@ -18,6 +18,7 @@ from ..core.session_logger import SessionLogger
 from ..core.settings import AppSettings, load_from_qsettings, save_to_qsettings
 from ..core.wire_decoder import DecodedFrame
 
+from .config_tab import ConfigTab
 from .inject_tab import InjectTab
 from .logging_tab import LoggingTab
 from .settings_tab import SettingsTab
@@ -30,7 +31,7 @@ from .signals import Bus
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("2oo3 Diagnostic Tool")
+        self.setWindowTitle("MooN framework diagnostic tool")
         self.resize(1200, 800)
         self.setStatusBar(QStatusBar())
 
@@ -58,6 +59,7 @@ class MainWindow(QMainWindow):
             settings_provider=lambda: self.settings,
             settings_saver=self._apply_settings,
         )
+        self.config_tab = ConfigTab(lambda: self.settings)
         self.settings_tab = SettingsTab(self.settings)
         self.settings_tab.settings_applied.connect(self._apply_settings)
 
@@ -66,6 +68,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.logging_tab, "Log")
         self.tabs.addTab(self.test_tab, "Tests")
         self.tabs.addTab(self.timing_tab, "Timing")
+        self.tabs.addTab(self.config_tab, "Config")
         self.tabs.addTab(self.settings_tab, "Settings")
 
         # Wire the Bus into the tabs

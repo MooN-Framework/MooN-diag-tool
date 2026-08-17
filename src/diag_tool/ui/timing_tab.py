@@ -161,12 +161,19 @@ class TimingTab(QWidget):
         self.measure_s = QDoubleSpinBox(); self.measure_s.setRange(1.0, 300.0); self.measure_s.setValue(8.0); self.measure_s.setSuffix(" s")
         self.setup_timeout_s = QDoubleSpinBox(); self.setup_timeout_s.setRange(1.0, 120.0); self.setup_timeout_s.setValue(15.0); self.setup_timeout_s.setSuffix(" s")
         self.max_overrun_frac = QDoubleSpinBox(); self.max_overrun_frac.setRange(0.0, 1.0); self.max_overrun_frac.setSingleStep(0.005); self.max_overrun_frac.setDecimals(3); self.max_overrun_frac.setValue(0.02)
+        self.overrun_tolerance_pct = QDoubleSpinBox()
+        self.overrun_tolerance_pct.setRange(0.1, 100.0)
+        self.overrun_tolerance_pct.setSingleStep(0.5)
+        self.overrun_tolerance_pct.setDecimals(1)
+        self.overrun_tolerance_pct.setValue(5.0)
+        self.overrun_tolerance_pct.setSuffix(" %")
         pf.addRow("cycle_ms candidates", self.candidates)
         pf.addRow("nominal", self.nominal)
         pf.addRow("minimum", self.minimum)
         pf.addRow("measure duration", self.measure_s)
         pf.addRow("operational timeout", self.setup_timeout_s)
         pf.addRow("max overrun fraction", self.max_overrun_frac)
+        pf.addRow("overrun tolerance", self.overrun_tolerance_pct)
         cd_row.addWidget(pbox, 2)
 
         tl.addLayout(cd_row)
@@ -371,6 +378,7 @@ class TimingTab(QWidget):
                 measure_s=self.measure_s.value(),
                 setup_timeout_s=self.setup_timeout_s.value(),
                 max_overrun_fraction=self.max_overrun_frac.value(),
+                overrun_tolerance_pct=self.overrun_tolerance_pct.value(),
                 diag_group=s.diag_group, diag_port=s.diag_port,
                 op_group=s.op_group, op_port=s.op_port,
                 interface_ip=s.interface_ip,
@@ -390,6 +398,7 @@ class TimingTab(QWidget):
                 measure_s=self.measure_s.value(),
                 setup_timeout_s=self.setup_timeout_s.value(),
                 max_overrun_fraction=self.max_overrun_frac.value(),
+                overrun_tolerance_pct=self.overrun_tolerance_pct.value(),
                 diag_group=s.diag_group, diag_port=s.diag_port,
                 op_group=s.op_group, op_port=s.op_port,
                 interface_ip=s.interface_ip,
