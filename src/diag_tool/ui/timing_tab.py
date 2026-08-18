@@ -24,7 +24,6 @@ from typing import Optional
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
-    QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -105,17 +104,18 @@ class TimingTab(QWidget):
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 20, 20, 20); outer.setSpacing(14)
+        s = self._get_settings()
 
         # Header
         head = QHBoxLayout()
         title = QLabel("Timing sweep"); title.setProperty("heading", True)
         head.addWidget(title); head.addStretch(1)
-        head.addWidget(QLabel("Mode:"))
-        self.mode = QComboBox(); self.mode.addItems(["simulated", "hardware"])
-        s = self._get_settings()
-        self.mode.setCurrentText(s.test_mode)
-        self.mode.currentTextChanged.connect(self._on_mode_change)
-        head.addWidget(self.mode)
+        # Mode is derived, not chosen: hardware iff at least one hardware
+        # node is configured (see _current_mode / _sync_mode_ui), same as
+        # the Test tab -- both tabs share the same hardware node list.
+        self.mode_label = QLabel("")
+        self.mode_label.setProperty("heading", True)
+        head.addWidget(self.mode_label)
         self.hw_nodes_btn = QPushButton("Configure hardware nodes…")
         self.hw_nodes_btn.clicked.connect(self._open_nodes_dialog)
         head.addWidget(self.hw_nodes_btn)
@@ -134,7 +134,10 @@ class TimingTab(QWidget):
         build_box = QGroupBox("Cross-compile")
         bf = QFormLayout(build_box); bf.setContentsMargins(12, 18, 12, 12); bf.setSpacing(8)
         self.target_triple = QLineEdit(s.target_triple)
-        self.target_triple.setPlaceholderText("e.g. aarch64-unknown-linux-gnu (empty = host)")
+        self.target_triple.setPlaceholderText(
+            "e.g. aarch64-unknown-linux-gnu (empty = host build via cargo, "
+            "set = cross-compile via `cross`)"
+        )
         self.binary_name = QLineEdit(s.binary_name)
         self.build_features = QLineEdit(s.build_features)
         self.build_features.setPlaceholderText("comma-separated, e.g. diagnostic")
@@ -223,13 +226,19 @@ class TimingTab(QWidget):
         split.setStretchFactor(2, 3)
         outer.addWidget(split, 1)
 
-        self._on_mode_change(self.mode.currentText())
+        self._sync_mode_ui()
 
     # ---- mode toggle ------------------------------------------------------
 
-    def _on_mode_change(self, mode: str) -> None:
-        is_hw = (mode == "hardware")
-        self.hw_nodes_btn.setEnabled(is_hw)
+    def _current_mode(self) -> str:
+        """Mode is derived, not chosen: hardware iff at least one hardware
+        node is configured, simulated otherwise."""
+        s = self._get_settings()
+        return "hardware" if nodes_from_json(s.hardware_nodes_json) else "simulated"
+
+    def _sync_mode_ui(self) -> None:
+        is_hw = self._current_mode() == "hardware"
+        self.mode_label.setText(f"Mode: {self._current_mode()}")
         self.deploy_btn.setEnabled(is_hw)
 
     # ---- hardware nodes dialog -------------------------------------------
@@ -244,6 +253,7 @@ class TimingTab(QWidget):
             new = replace(s, hardware_nodes_json=nodes_to_json(updated))
             self._save_settings(new)
             self._append_build_line(f"[nodes] saved {len(updated)} hardware node(s)")
+            self._sync_mode_ui()
 
     # ---- cross-compile ---------------------------------------------------
 
@@ -351,7 +361,7 @@ class TimingTab(QWidget):
         if not cands:
             return
 
-        mode = self.mode.currentText()
+        mode = self._current_mode()
 
         if mode == "simulated":
             if not s.rust_repo_path:

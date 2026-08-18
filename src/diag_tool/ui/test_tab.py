@@ -4,7 +4,20 @@ Test tab: runs pytest against the scenarios directory.
 Modes:
 - simulated: local pytest as usual; conftest spawns nodes via cargo.
 - hardware:  pytest is called with --fabric=hardware plus the GUI's
-             multicast config. No nodes are spawned locally.
+             multicast config. Optionally (see "Deploy binary + config
+             before run") builds the Rust binary and pushes binary +
+             config to every configured hardware node via SSH/SCP
+             before launching pytest -- reusing the same
+             ssh_deploy/cross_compile building blocks as the Timing
+             tab, just generalised beyond the cycle-duration sweep.
+
+Scenario feasibility (see core/scenario_meta.py): each scenario needs
+either 3 or 4 nodes (fabric_3/fabric_4 fixture) and may rely on
+helpers that don't work against real hardware (restart_node, log
+pattern matching). In hardware mode the scenario list marks/greys out
+what isn't feasible with the currently configured node count, and a
+run with no explicit selection only picks feasible scenarios instead
+of the whole directory.
 
 pytest runs as a subprocess. Output is streamed line-by-line into the
 UI via a signal (thread-safe).
@@ -18,14 +31,15 @@ import shlex
 import subprocess
 import sys
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal, Slot
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtGui import QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
+    QCheckBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -40,6 +54,23 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from ..core.cross_compile import CrossBuild
+from ..core.scenario_meta import ScenarioMeta, analyze_scenarios, infeasible_reason
+from ..core.ssh_deploy import (
+    HardwareNode,
+    SshError,
+    nodes_from_json,
+    nodes_to_json,
+    scp_bytes,
+    scp_file,
+    ssh_exec,
+)
+from .hardware_nodes_dialog import HardwareNodesDialog
+
+# harness lives alongside diag_tool in the same repo (src/harness),
+# same import style as core/timing_sweep.py.
+from harness.config_gen import make_spec, render_toml_str
 
 
 # Simple pytest output tokenisation. We inspect each incoming line and
@@ -118,11 +149,18 @@ def _colorize(line: str) -> str:
 class TestTab(QWidget):
     line_received = Signal(str)
 
-    def __init__(self, settings_provider, parent=None) -> None:
+    def __init__(self, settings_provider, settings_saver, parent=None) -> None:
+        """
+        settings_provider() -> current AppSettings
+        settings_saver(new_settings) -> persists changes (used for the
+            hardware node list, shared with the Timing tab)
+        """
         super().__init__(parent)
         self._get_settings = settings_provider
+        self._save_settings = settings_saver
         self._proc: Optional[subprocess.Popen] = None
         self._reader: Optional[threading.Thread] = None
+        self._scenario_meta: dict[str, ScenarioMeta] = {}
 
         self._build()
         self.line_received.connect(self._append_line)
@@ -136,14 +174,43 @@ class TestTab(QWidget):
         head = QHBoxLayout()
         title = QLabel("Test runner"); title.setProperty("heading", True)
         head.addWidget(title); head.addStretch(1)
-        head.addWidget(QLabel("Mode:"))
-        self.mode = QComboBox()
-        self.mode.addItems(["simulated", "hardware"])
-        head.addWidget(self.mode)
+        # Mode is derived, not chosen: hardware iff at least one hardware
+        # node is configured below, simulated otherwise (see
+        # _current_mode / _sync_mode_ui).
+        self.mode_label = QLabel("")
+        self.mode_label.setProperty("heading", True)
+        head.addWidget(self.mode_label)
         self.refresh_btn = QPushButton("Load scenarios")
         self.refresh_btn.clicked.connect(self._reload_scenarios)
         head.addWidget(self.refresh_btn)
+        self.select_feasible_btn = QPushButton("Select feasible")
+        self.select_feasible_btn.setToolTip(
+            "Select all scenarios that fit the currently configured "
+            "hardware node count and don't rely on restart_node()."
+        )
+        self.select_feasible_btn.clicked.connect(self._select_feasible)
+        head.addWidget(self.select_feasible_btn)
         outer.addLayout(head)
+
+        # Hardware nodes row -- configuring at least one node here is what
+        # switches the tab into hardware mode (see _current_mode).
+        hw_row = QHBoxLayout()
+        hw_row.addWidget(QLabel("Hardware nodes:"))
+        self.hw_summary = QLabel("")
+        self.hw_summary.setProperty("muted", True)
+        hw_row.addWidget(self.hw_summary, 1)
+        self.hw_nodes_btn = QPushButton("Configure hardware nodes…")
+        self.hw_nodes_btn.clicked.connect(self._open_nodes_dialog)
+        hw_row.addWidget(self.hw_nodes_btn)
+        self.deploy_chk = QCheckBox("Deploy binary + config before run")
+        self.deploy_chk.setChecked(True)
+        self.deploy_chk.setToolTip(
+            "Cross-compile the Rust binary and push binary + a fresh "
+            "config to every configured hardware node via SSH/SCP, "
+            "then (re)start it, before launching pytest."
+        )
+        hw_row.addWidget(self.deploy_chk)
+        outer.addLayout(hw_row)
 
         split = QSplitter(Qt.Vertical)
         split.setChildrenCollapsible(False)
@@ -212,6 +279,46 @@ class TestTab(QWidget):
         split.setStretchFactor(1, 3)
         outer.addWidget(split, 1)
 
+        self._sync_mode_ui()
+
+    # ---- mode toggle / hardware nodes -------------------------------------
+
+    def _current_mode(self) -> str:
+        """Mode is derived, not chosen: hardware iff at least one hardware
+        node is configured, simulated otherwise."""
+        s = self._get_settings()
+        return "hardware" if nodes_from_json(s.hardware_nodes_json) else "simulated"
+
+    def _sync_mode_ui(self) -> None:
+        is_hw = self._current_mode() == "hardware"
+        self.mode_label.setText(f"Mode: {self._current_mode()}")
+        self.deploy_chk.setEnabled(is_hw)
+        self._refresh_hw_summary()
+        if self.scenarios_list.count():
+            self._reload_scenarios()
+
+    def _refresh_hw_summary(self) -> None:
+        s = self._get_settings()
+        nodes = nodes_from_json(s.hardware_nodes_json)
+        if nodes:
+            hosts = ", ".join(
+                f"{n.node_id}:{n.host}" for n in sorted(nodes, key=lambda n: n.node_id)
+            )
+            self.hw_summary.setText(f"{len(nodes)} node(s) — {hosts}")
+        else:
+            self.hw_summary.setText("no hardware nodes configured")
+
+    def _open_nodes_dialog(self) -> None:
+        s = self._get_settings()
+        nodes = nodes_from_json(s.hardware_nodes_json)
+        dlg = HardwareNodesDialog(nodes, parent=self)
+        if dlg.exec():
+            updated = dlg.collect()
+            new = replace(s, hardware_nodes_json=nodes_to_json(updated))
+            self._save_settings(new)
+            self._append_line(f"[nodes] saved {len(updated)} hardware node(s)")
+            self._sync_mode_ui()
+
     def _repo_root(self) -> Path:
         # __file__ = <repo>/src/diag_tool/ui/test_tab.py -> parents[3] = <repo>
         return Path(__file__).resolve().parents[3]
@@ -233,14 +340,39 @@ class TestTab(QWidget):
     def _reload_scenarios(self) -> None:
         d = self._scenarios_dir()
         self.scenarios_list.clear()
+        self._scenario_meta = {}
         if d is None:
             QMessageBox.warning(self, "No directory",
                                 "Set 'Scenarios directory' in Settings first.")
             return
+
+        self._scenario_meta = analyze_scenarios(d)
+        is_hw = self._current_mode() == "hardware"
+        node_count = len(nodes_from_json(self._get_settings().hardware_nodes_json))
+
         for p in sorted(d.glob("test_*.py")):
-            it = QListWidgetItem(p.name)
+            meta = self._scenario_meta[str(p)]
+            tag = f"[{meta.required_nodes}N]"
+            if meta.hw_notes:
+                tag += "  ⚠"
+            it = QListWidgetItem(f"{p.name}   {tag}")
             it.setData(Qt.UserRole, str(p))
+
+            infeasible = is_hw and (
+                meta.hw_status == "unsupported" or meta.required_nodes > node_count
+            )
+            if infeasible:
+                it.setFlags(it.flags() & ~Qt.ItemIsEnabled & ~Qt.ItemIsSelectable)
+                it.setToolTip(infeasible_reason(meta, node_count))
+                it.setForeground(QColor("#6A6F76"))
+            elif meta.hw_notes:
+                it.setToolTip("; ".join(meta.hw_notes))
             self.scenarios_list.addItem(it)
+
+    def _select_feasible(self) -> None:
+        for i in range(self.scenarios_list.count()):
+            it = self.scenarios_list.item(i)
+            it.setSelected(bool(it.flags() & Qt.ItemIsEnabled))
 
     def _on_stop(self) -> None:
         if self._proc and self._proc.poll() is None:
@@ -253,10 +385,52 @@ class TestTab(QWidget):
             QMessageBox.warning(self, "No directory",
                                 "Set 'Scenarios directory' in Settings first.")
             return
+        if not self._scenario_meta:
+            self._reload_scenarios()
 
         selected = [self.scenarios_list.item(i).data(Qt.UserRole)
                     for i in range(self.scenarios_list.count())
                     if self.scenarios_list.item(i).isSelected()]
+
+        mode = self._current_mode()
+        hw_nodes = nodes_from_json(s.hardware_nodes_json) if mode == "hardware" else []
+        node_count = len(hw_nodes)
+        skipped: list[str] = []
+
+        if mode == "hardware":
+            if selected:
+                # Explicit selection: drop anything infeasible for the
+                # current node count (list should already prevent this
+                # via disabled items, but the node count may have
+                # changed since the list was last loaded).
+                feasible = []
+                for path_str in selected:
+                    meta = self._scenario_meta.get(path_str)
+                    if meta is None or (
+                        meta.hw_status != "unsupported" and meta.required_nodes <= node_count
+                    ):
+                        feasible.append(path_str)
+                    else:
+                        skipped.append(f"{Path(path_str).name}: {infeasible_reason(meta, node_count)}")
+                selected = feasible
+                if not selected:
+                    QMessageBox.warning(self, "No feasible scenarios",
+                                        "All selected scenarios are infeasible with the "
+                                        "currently configured hardware nodes.")
+                    return
+            else:
+                # No explicit selection: don't hand pytest the whole
+                # directory (that would include scenarios that need
+                # 4 nodes or restart_node()) -- only the feasible ones.
+                selected = [
+                    path_str for path_str, meta in sorted(self._scenario_meta.items())
+                    if meta.hw_status != "unsupported" and meta.required_nodes <= node_count
+                ]
+                if not selected:
+                    QMessageBox.warning(self, "No feasible scenarios",
+                                        f"No scenario fits {node_count} configured hardware "
+                                        f"node(s). Configure more nodes or pick a smaller set.")
+                    return
 
         cmd = [sys.executable, "-m", "pytest"]
         # Force our own pytest.ini + conftest so we never accidentally
@@ -273,7 +447,7 @@ class TestTab(QWidget):
         if s.rust_repo_path:
             cmd.append(f"--rust-repo={s.rust_repo_path}")
 
-        if self.mode.currentText() == "hardware":
+        if mode == "hardware":
             cmd += [
                 "--fabric=hardware",
                 f"--diag-group={s.diag_group}",
@@ -294,7 +468,59 @@ class TestTab(QWidget):
                 env[k.strip()] = v.strip()
 
         self.output.clear()
-        self._append_line(f"$ (cwd={repo_root}) " + " ".join(shlex.quote(c) for c in cmd))
+        for msg in skipped:
+            self._append_line(f"[skip] {msg}")
+
+        deploy_first = mode == "hardware" and self.deploy_chk.isChecked()
+
+        self.run_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self._reader = threading.Thread(
+            target=self._run_worker,
+            args=(cmd, repo_root, env, deploy_first, s, hw_nodes),
+            name="test-run", daemon=True,
+        )
+        self._reader.start()
+
+    # ---- deploy-then-run worker --------------------------------------------
+
+    def _run_worker(self, cmd: list[str], repo_root: Path, env: dict,
+                     deploy_first: bool, s, hw_nodes: list[HardwareNode]) -> None:
+        if deploy_first:
+            if not hw_nodes:
+                self.line_received.emit(
+                    "[deploy] no hardware nodes configured — skipping deploy, "
+                    "assuming nodes are already running"
+                )
+            elif not s.rust_repo_path:
+                self.line_received.emit(
+                    "[deploy] aborted: set 'Rust repository' in Settings first"
+                )
+                self.line_received.emit("__RUN_DONE__")
+                return
+            else:
+                self.line_received.emit(
+                    f"\n=== deploy: build + push to {len(hw_nodes)} node(s) ==="
+                )
+                features = [f.strip() for f in (s.build_features or "").split(",") if f.strip()]
+                cross = CrossBuild(
+                    repo_path=Path(s.rust_repo_path),
+                    target_triple=s.target_triple,
+                    features=features,
+                    binary_name=s.binary_name or "node",
+                )
+                rc, bin_path = self._blocking_build(cross)
+                if rc != 0 or bin_path is None:
+                    self.line_received.emit("[deploy] aborted: build failed")
+                    self.line_received.emit("__RUN_DONE__")
+                    return
+                if not self._deploy_to_hardware(hw_nodes, bin_path, s):
+                    self.line_received.emit("[deploy] aborted: deploy failed")
+                    self.line_received.emit("__RUN_DONE__")
+                    return
+                self.line_received.emit("=== deploy done, starting tests ===\n")
+
+        self.line_received.emit(f"$ (cwd={repo_root}) " + " ".join(shlex.quote(c) for c in cmd))
         try:
             self._proc = subprocess.Popen(
                 cmd, cwd=repo_root, env=env,
@@ -302,21 +528,65 @@ class TestTab(QWidget):
                 text=True, bufsize=1,
             )
         except OSError as e:
-            self._append_line(f"[Error] pytest could not be started: {e}")
+            self.line_received.emit(f"[Error] pytest could not be started: {e}")
+            self.line_received.emit("__RUN_DONE__")
             return
 
-        self.run_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self._reader = threading.Thread(target=self._read_loop, name="pytest-reader", daemon=True)
-        self._reader.start()
-
-    def _read_loop(self) -> None:
-        assert self._proc and self._proc.stdout
+        assert self._proc.stdout
         for line in self._proc.stdout:
             self.line_received.emit(line.rstrip("\n"))
         rc = self._proc.wait()
         self.line_received.emit(f"[pytest exit={rc}]")
         self.line_received.emit("__RUN_DONE__")
+
+    def _blocking_build(self, cross: CrossBuild) -> tuple[int, Optional[Path]]:
+        """Run CrossBuild synchronously from within the worker thread,
+        streaming its output the same way pytest output is streamed."""
+        done = threading.Event()
+        result: dict = {"rc": -1, "path": None}
+
+        def on_done(rc: int, path: Optional[Path]) -> None:
+            result["rc"] = rc
+            result["path"] = path
+            done.set()
+
+        cross.start(on_line=lambda ln: self.line_received.emit(ln), on_done=on_done)
+        done.wait()
+        return result["rc"], result["path"]
+
+    def _deploy_to_hardware(self, nodes: list[HardwareNode], bin_path: Path, s) -> bool:
+        """Push the built binary + a freshly rendered config to every
+        node, then (re)start it via its configured start_cmd. Same
+        push/stop/start sequence as TimingSweep._hw_start, generalised
+        for a plain test run instead of a cycle-duration sweep."""
+        nominal = len(nodes)
+        for hn in sorted(nodes, key=lambda n: n.node_id):
+            spec = make_spec(
+                own_id=hn.node_id, nominal=nominal, minimum=2, cycle_ms=20,
+                fabric_group=s.op_group, fabric_port=s.op_port,
+                diag_group=s.diag_group, diag_port=s.diag_port,
+                interface="lo",
+            )
+            toml_text = render_toml_str(spec)
+            self.line_received.emit(f"[deploy] {hn.host} → config {hn.remote_config}")
+            try:
+                scp_bytes(hn, toml_text.encode(), hn.remote_config)
+                self.line_received.emit(f"[deploy] {hn.host} → binary {hn.remote_binary}")
+                scp_file(hn, bin_path, hn.remote_binary, timeout=120.0)
+            except SshError as e:
+                self.line_received.emit(f"[deploy] {hn.host} FAILED (transfer): {e.output}")
+                return False
+            try:
+                ssh_exec(hn, hn.resolved_stop_cmd(), timeout=10.0)
+            except SshError as e:
+                self.line_received.emit(f"[deploy] {hn.host} stop_cmd failed (continuing): {e.output}")
+            self.line_received.emit(f"[deploy] {hn.host} starting")
+            try:
+                ssh_exec(hn, hn.resolved_start_cmd(), timeout=15.0)
+            except SshError as e:
+                self.line_received.emit(f"[deploy] {hn.host} FAILED (start): {e.output}")
+                return False
+        return True
 
     @Slot(str)
     def _append_line(self, line: str) -> None:

@@ -1,10 +1,23 @@
 """
 Cross-compile helper for the Rust binary.
 
-Runs `cargo build --release [--target=TRIPLE] [--features=...]` in the
-repository root and streams stdout+stderr line by line to a callback.
-The caller uses the callback to feed a GUI text view (in the UI
-thread).
+Host builds (no target triple, e.g. for simulated mode) run plain
+`cargo build --release [--features=...]` in the repository root.
+
+Cross builds (target triple set, e.g. aarch64-unknown-linux-gnu for
+the Pi nodes) run through `cross build` instead of bare
+`cargo build --target=...` -- `cross` builds inside a Docker/Podman
+container that already has the matching linker/toolchain for the
+target, so the host doesn't need e.g. gcc-aarch64-linux-gnu installed.
+Requires the `cross` binary (`cargo install cross --locked`) and a
+running Docker/Podman on the machine that runs the GUI.
+
+Output layout is identical either way (`target/<triple>/release/...`
+or `target/release/...`), since `cross` mounts the repo and drives
+the same cargo underneath.
+
+Streams stdout+stderr line by line to a callback. The caller uses the
+callback to feed a GUI text view (in the UI thread).
 
 Returns the path to the produced binary on success, or None with the
 last error message written to the callback.
@@ -29,8 +42,13 @@ class CrossBuild:
         self._proc: Optional[subprocess.Popen] = None
         self._reader: Optional[threading.Thread] = None
 
+    def _tool(self) -> str:
+        # Host build (no triple) doesn't need a container -- only
+        # actual cross-compilation goes through `cross`.
+        return "cross" if self.target_triple else "cargo"
+
     def _cmd(self) -> list[str]:
-        cmd = ["cargo", "build", "--release"]
+        cmd = [self._tool(), "build", "--release"]
         if self.target_triple:
             cmd += ["--target", self.target_triple]
         if self.features:
@@ -39,7 +57,7 @@ class CrossBuild:
         return cmd
 
     def expected_binary_path(self) -> Path:
-        """Where cargo will drop the binary."""
+        """Where cargo/cross will drop the binary."""
         base = self.repo_path / "target"
         if self.target_triple:
             base = base / self.target_triple
@@ -72,7 +90,8 @@ class CrossBuild:
                 text=True, bufsize=1,
             )
         except OSError as e:
-            on_line(f"[error] cargo could not be started: {e}")
+            hint = " (is `cross` installed? `cargo install cross --locked`, needs Docker/Podman running)" if self._tool() == "cross" else ""
+            on_line(f"[error] {self._tool()} could not be started: {e}{hint}")
             on_done(-1, None)
             return
 

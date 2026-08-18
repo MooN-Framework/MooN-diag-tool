@@ -54,13 +54,16 @@ class MainWindow(QMainWindow):
         self.status_tab = StatusTab(self.registry, lambda: self.diag)
         self.inject_tab = InjectTab(self.registry, lambda: self.diag)
         self.logging_tab = LoggingTab(self.session_logger)
-        self.test_tab = TestTab(lambda: self.settings)
+        self.test_tab = TestTab(
+            settings_provider=lambda: self.settings,
+            settings_saver=self._apply_settings,
+        )
         self.timing_tab = TimingTab(
             settings_provider=lambda: self.settings,
             settings_saver=self._apply_settings,
         )
         self.config_tab = ConfigTab(lambda: self.settings)
-        self.settings_tab = SettingsTab(self.settings)
+        self.settings_tab = SettingsTab(lambda: self.settings)
         self.settings_tab.settings_applied.connect(self._apply_settings)
 
         self.tabs.addTab(self.status_tab, "Status")

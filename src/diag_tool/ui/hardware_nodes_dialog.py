@@ -1,7 +1,7 @@
 """
 Dialog to edit the list of hardware nodes.
 
-Each node has: node_id, host, user, port, key_path, remote_binary,
+Each node has: node_id, host, user, port, password, remote_binary,
 remote_config, start_cmd, stop_cmd. The "Test" button in the row runs a
 quick SSH liveness probe and shows the result inline.
 """
@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 from ..core.ssh_deploy import HardwareNode, check_reachable
 
 
-HEADERS = ["ID", "Host", "User", "Port", "Key path",
+HEADERS = ["ID", "Host", "User", "Port", "Password",
            "Remote binary", "Remote config",
            "Start cmd", "Stop cmd", "Status"]
 
@@ -49,9 +49,10 @@ class HardwareNodesDialog(QDialog):
         outer.setSpacing(10)
 
         hint = QLabel(
-            "One row per node. Uses key-based SSH auth (no passwords). "
-            "Point 'Key path' at a private key file, or leave empty to use "
-            "your default keys / ssh-agent."
+            "One row per node. Uses password-based SSH auth via sshpass "
+            "(requires the 'sshpass' package on this machine). "
+            "Plaintext in this table -- fine for the trivial test-network "
+            "password, but don't reuse a real credential here."
         )
         hint.setProperty("muted", True)
         hint.setWordWrap(True)
@@ -71,7 +72,7 @@ class HardwareNodesDialog(QDialog):
             1: 150,  # Host
             2: 80,   # User
             3: 60,   # Port
-            4: 180,  # Key path
+            4: 140,  # Password
             5: 180,  # Remote binary
             6: 180,  # Remote config
             7: 220,  # Start cmd
@@ -109,7 +110,7 @@ class HardwareNodesDialog(QDialog):
         r = self.table.rowCount()
         self.table.insertRow(r)
         fields = [
-            str(n.node_id), n.host, n.user, str(n.port), n.key_path,
+            str(n.node_id), n.host, n.user, str(n.port), n.password,
             n.remote_binary, n.remote_config, n.start_cmd, n.stop_cmd,
         ]
         for col, val in enumerate(fields):
@@ -139,7 +140,7 @@ class HardwareNodesDialog(QDialog):
                 host=host,
                 user=self.table.item(r, 2).text() or "root",
                 port=port,
-                key_path=self.table.item(r, 4).text() if self.table.item(r, 4) else "",
+                password=self.table.item(r, 4).text() if self.table.item(r, 4) else "",
                 remote_binary=self.table.item(r, 5).text() or "/opt/voting/node",
                 remote_config=self.table.item(r, 6).text() or "/opt/voting/node.toml",
                 start_cmd=self.table.item(r, 7).text() or "systemctl restart voting-node",

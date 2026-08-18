@@ -8,7 +8,6 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -27,9 +26,23 @@ from ..core.settings import AppSettings
 class SettingsTab(QWidget):
     settings_applied = Signal(object)
 
-    def __init__(self, initial: AppSettings, parent=None) -> None:
+    def __init__(self, settings_provider, parent=None) -> None:
+        """
+        settings_provider() -> current AppSettings.
+
+        Bug fix: _on_apply() used to build a brand-new AppSettings from
+        only the fields shown in this tab, so every "Apply && reconnect"
+        silently reset everything else (hardware_nodes_json,
+        target_triple, binary_name, build_features, ...) back to its
+        default -- that's why the hardware node list kept disappearing.
+        Fetching the live settings at apply-time (rather than the
+        `initial` snapshot from construction, which could already be
+        stale by then) and dataclasses.replace()-ing only the fields
+        this tab actually edits fixes that for good.
+        """
         super().__init__(parent)
-        self._build(initial)
+        self._get_settings = settings_provider
+        self._build(settings_provider())
 
     def _build(self, s: AppSettings) -> None:
         outer = QVBoxLayout(self)
@@ -64,18 +77,20 @@ class SettingsTab(QWidget):
         pf.addRow("Rust repository", self._with_browse(self.rust_repo))
         outer.addWidget(paths)
 
-        # Test mode
+        # Test mode -- no longer a manual choice, see Test/Timing tab:
+        # mode is derived from whether any hardware node is configured.
+        # Kept here as an info panel so it's not a mystery where the
+        # switch went.
         tm = QGroupBox("Test mode")
         tf = QFormLayout(tm); tf.setContentsMargins(12, 20, 12, 12); tf.setSpacing(10)
-        self.test_mode = QComboBox()
-        self.test_mode.addItems(["simulated", "hardware"])
-        self.test_mode.setCurrentText(s.test_mode)
-        tf.addRow("Default mode", self.test_mode)
         hint = QLabel(
             "<span style='color:#949BA4'>"
-            "<b>simulated</b>: pytest spawns nodes locally via cargo.<br>"
-            "<b>hardware</b>: uses already-running nodes on the configured "
-            "multicast groups."
+            "Mode is no longer chosen here -- it's derived automatically "
+            "in the Test/Timing tab from whether any hardware node is "
+            "configured ('Configure hardware nodes…'):<br>"
+            "<b>simulated</b> (0 nodes): pytest spawns nodes locally via cargo.<br>"
+            "<b>hardware</b> (&ge;1 node): uses the configured nodes over "
+            "the multicast groups + SSH deploy."
             "</span>"
         )
         hint.setTextFormat(Qt.RichText)
@@ -109,7 +124,10 @@ class SettingsTab(QWidget):
         return wrap
 
     def _on_apply(self) -> None:
-        s = AppSettings(
+        from dataclasses import replace
+        current = self._get_settings()
+        s = replace(
+            current,
             diag_group=self.diag_group.text().strip(),
             diag_port=self.diag_port.value(),
             op_group=self.op_group.text().strip(),
@@ -118,6 +136,5 @@ class SettingsTab(QWidget):
             session_log_dir=self.session_dir.text().strip(),
             rust_repo_path=self.rust_repo.text().strip(),
             scenarios_path="",  # obsolete: tests live in this repo now
-            test_mode=self.test_mode.currentText(),
         )
         self.settings_applied.emit(s)
