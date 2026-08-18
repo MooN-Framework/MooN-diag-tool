@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.cross_compile import CrossBuild
-from ..core.ssh_deploy import HardwareNode, SshError, nodes_from_json, nodes_to_json, scp_file
+from ..core.ssh_deploy import HardwareNode, SshError, enabled_nodes, nodes_from_json, nodes_to_json, scp_file
 from ..core.timing_sweep import (
     CandidateResult,
     SweepParams,
@@ -77,6 +77,8 @@ class TimingTab(QWidget):
     _sweep_done = Signal(object)
     _deploy_line = Signal(str)
     _deploy_done = Signal(bool)
+    _sweep_ready = Signal(str, object)   # mode, SweepParams -- predeploy succeeded
+    _predeploy_failed = Signal()
 
     def __init__(self, settings_provider, settings_saver, parent=None) -> None:
         """
@@ -100,6 +102,8 @@ class TimingTab(QWidget):
         self._sweep_done.connect(self._on_sweep_done)
         self._deploy_line.connect(self._append_build_line)
         self._deploy_done.connect(self._on_deploy_done)
+        self._sweep_ready.connect(self._on_sweep_ready)
+        self._predeploy_failed.connect(self._on_predeploy_failed)
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -232,14 +236,27 @@ class TimingTab(QWidget):
 
     def _current_mode(self) -> str:
         """Mode is derived, not chosen: hardware iff at least one hardware
-        node is configured, simulated otherwise."""
+        node is both configured and enabled, simulated otherwise."""
         s = self._get_settings()
-        return "hardware" if nodes_from_json(s.hardware_nodes_json) else "simulated"
+        return "hardware" if enabled_nodes(nodes_from_json(s.hardware_nodes_json)) else "simulated"
 
     def _sync_mode_ui(self) -> None:
         is_hw = self._current_mode() == "hardware"
         self.mode_label.setText(f"Mode: {self._current_mode()}")
         self.deploy_btn.setEnabled(is_hw)
+        # In hardware mode "nominal" is derived from the enabled node
+        # count (see _on_start_sweep), not manually set -- disable the
+        # spinbox and show the derived value so it's not a stale/wrong
+        # number sitting there unused.
+        self.nominal.setEnabled(not is_hw)
+        if is_hw:
+            s = self._get_settings()
+            count = len(enabled_nodes(nodes_from_json(s.hardware_nodes_json)))
+            if count > 0:
+                self.nominal.setValue(count)
+            self.nominal.setToolTip("Derived from the enabled hardware node count.")
+        else:
+            self.nominal.setToolTip("")
 
     # ---- hardware nodes dialog -------------------------------------------
 
@@ -300,46 +317,91 @@ class TimingTab(QWidget):
 
     def _on_deploy(self) -> None:
         s = self._get_settings()
-        nodes = nodes_from_json(s.hardware_nodes_json)
+        nodes = enabled_nodes(nodes_from_json(s.hardware_nodes_json))
         if not nodes:
             QMessageBox.warning(self, "No nodes",
-                                "Add hardware nodes first (Configure hardware nodes…).")
+                                "Add and enable hardware nodes first (Configure hardware nodes…).")
             return
-        # Prefer the binary produced by the last build if we have one and
-        # it exists; otherwise fall back to the expected path.
-        bin_path = self._built_binary_path
-        if bin_path is None:
-            helper = CrossBuild(
-                repo_path=Path(s.rust_repo_path or "."),
-                target_triple=s.target_triple,
-                binary_name=s.binary_name or "node",
-            )
-            bin_path = helper.expected_binary_path()
-        if not bin_path.exists():
-            QMessageBox.warning(self, "Binary missing",
-                                f"Expected binary not found:\n{bin_path}\n\n"
-                                f"Run cargo build first.")
+        if not s.rust_repo_path:
+            QMessageBox.warning(self, "No repo",
+                                "Set 'Rust repository' in Settings first.")
             return
 
         self.deploy_btn.setEnabled(False)
         self.deploy_btn.setText("Deploying…")
-        self._append_build_line(f"\n[deploy] source: {bin_path}")
+        self.log.clear()
+        self._append_build_line(f"=== deploy: {len(nodes)} enabled node(s) ===")
 
         def worker() -> None:
-            ok_all = True
-            for hn in nodes:
-                try:
-                    self._deploy_line.emit(
-                        f"[deploy] {hn.host} → {hn.remote_binary}"
-                    )
-                    scp_file(hn, bin_path, hn.remote_binary, timeout=120.0)
-                    self._deploy_line.emit(f"[deploy] {hn.host} ok")
-                except SshError as e:
-                    ok_all = False
-                    self._deploy_line.emit(f"[deploy] {hn.host} FAILED: {e.output}")
-            self._deploy_done.emit(ok_all)
+            bin_path = self._build_and_push_binary(nodes, s, self._deploy_line.emit)
+            self._deploy_done.emit(bin_path is not None)
 
         threading.Thread(target=worker, name="deploy", daemon=True).start()
+
+    def _build_and_push_binary(self, nodes: list[HardwareNode], s,
+                                emit_line) -> Optional[Path]:
+        """Ensure a built binary exists locally (building with `cross` +
+        the configured features if it's missing) and push it to every
+        node in `nodes`. Returns the local binary path on success, None
+        on any failure. Runs synchronously -- call from a worker thread.
+        Shared by the "Deploy to all hardware nodes" button and the
+        hardware-mode sweep, which both need the same "binary is
+        actually on the node before we try to start it" guarantee.
+        """
+        features = [f.strip() for f in (s.build_features or "").split(",") if f.strip()]
+        helper = CrossBuild(
+            repo_path=Path(s.rust_repo_path),
+            target_triple=s.target_triple,
+            features=features,
+            binary_name=s.binary_name or "node",
+        )
+        # Prefer the binary from the last in-tab build if it's still
+        # there; otherwise build it now instead of just complaining
+        # it's missing -- with the configured features (defaults to
+        # "diagnostic", required for the JSON diag channel).
+        bin_path = self._built_binary_path
+        if bin_path is None or not bin_path.exists():
+            expected = helper.expected_binary_path()
+            if expected.exists():
+                bin_path = expected
+            else:
+                emit_line(
+                    f"[deploy] no binary at {expected} -- building first "
+                    f"(features={s.build_features!r})..."
+                )
+                rc, built = self._blocking_build(helper)
+                if rc != 0 or built is None:
+                    emit_line("[deploy] aborted: build failed")
+                    return None
+                bin_path = built
+
+        emit_line(f"[deploy] source: {bin_path}")
+        ok_all = True
+        for hn in nodes:
+            try:
+                emit_line(f"[deploy] {hn.host} → {hn.remote_binary}")
+                scp_file(hn, bin_path, hn.remote_binary, timeout=120.0)
+                emit_line(f"[deploy] {hn.host} ok")
+            except SshError as e:
+                ok_all = False
+                emit_line(f"[deploy] {hn.host} FAILED: {e.output}")
+        return bin_path if ok_all else None
+
+    def _blocking_build(self, cross: CrossBuild) -> tuple[int, Optional[Path]]:
+        """Run CrossBuild synchronously from within the deploy worker
+        thread, streaming its output into the same log the deploy
+        itself writes to."""
+        done = threading.Event()
+        result: dict = {"rc": -1, "path": None}
+
+        def on_done(rc: int, path: Optional[Path]) -> None:
+            result["rc"] = rc
+            result["path"] = path
+            done.set()
+
+        cross.start(on_line=lambda ln: self._deploy_line.emit(ln), on_done=on_done)
+        done.wait()
+        return result["rc"], result["path"]
 
     @Slot(bool)
     def _on_deploy_done(self, ok: bool) -> None:
@@ -360,76 +422,117 @@ class TimingTab(QWidget):
             return
         if not cands:
             return
+        if not s.rust_repo_path:
+            QMessageBox.warning(self, "No repo",
+                                "Set 'Rust repository' in Settings first.")
+            return
 
         mode = self._current_mode()
-
-        if mode == "simulated":
-            if not s.rust_repo_path:
-                QMessageBox.warning(self, "No repo",
-                                    "Set 'Rust repository' in Settings first.")
-                return
-            helper = CrossBuild(
-                repo_path=Path(s.rust_repo_path),
-                target_triple="",  # host build for simulated
-                binary_name=s.binary_name or "node",
-            )
-            bin_path = helper.expected_binary_path()
-            if not bin_path.exists():
-                QMessageBox.warning(self, "Host binary missing",
-                                    f"Expected host binary not found:\n{bin_path}\n\n"
-                                    f"Run 'cargo build --release' (no target triple) first.")
-                return
-            work_dir = Path(s.session_log_dir) / "timing_sweep"
-            work_dir.mkdir(parents=True, exist_ok=True)
-            params = SweepParams(
-                candidates_ms=cands,
-                nominal=self.nominal.value(),
-                minimum=self.minimum.value(),
-                measure_s=self.measure_s.value(),
-                setup_timeout_s=self.setup_timeout_s.value(),
-                max_overrun_fraction=self.max_overrun_frac.value(),
-                overrun_tolerance_pct=self.overrun_tolerance_pct.value(),
-                diag_group=s.diag_group, diag_port=s.diag_port,
-                op_group=s.op_group, op_port=s.op_port,
-                interface_ip=s.interface_ip,
-                local_binary=bin_path,
-                local_work_dir=work_dir,
-            )
-        else:
-            hw_nodes = nodes_from_json(s.hardware_nodes_json)
+        hw_nodes: list[HardwareNode] = []
+        if mode == "hardware":
+            hw_nodes = enabled_nodes(nodes_from_json(s.hardware_nodes_json))
             if not hw_nodes:
                 QMessageBox.warning(self, "No nodes",
-                                    "Add hardware nodes first.")
+                                    "Add and enable hardware nodes first.")
                 return
-            params = SweepParams(
-                candidates_ms=cands,
-                nominal=self.nominal.value(),
-                minimum=self.minimum.value(),
-                measure_s=self.measure_s.value(),
-                setup_timeout_s=self.setup_timeout_s.value(),
-                max_overrun_fraction=self.max_overrun_frac.value(),
-                overrun_tolerance_pct=self.overrun_tolerance_pct.value(),
-                diag_group=s.diag_group, diag_port=s.diag_port,
-                op_group=s.op_group, op_port=s.op_port,
-                interface_ip=s.interface_ip,
-                hardware_nodes=hw_nodes,
-            )
+            if self.minimum.value() > len(hw_nodes):
+                QMessageBox.warning(
+                    self, "Bad quorum",
+                    f"'minimum' ({self.minimum.value()}) can't exceed the "
+                    f"number of enabled hardware nodes ({len(hw_nodes)}).",
+                )
+                return
 
-        # Reset UI state
+        # Reset UI state -- predeploy (build if missing, push for
+        # hardware) happens in a worker thread before the sweep itself
+        # starts, same "don't just complain the binary is missing"
+        # guarantee as the Deploy button. cancel_btn stays disabled
+        # until there's an actual sweep running to cancel.
         self.table.setRowCount(0)
         self.smallest_lbl.setText("")
         self.start_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
         self._append_sweep_line(
             f"\n=== sweep start ({mode}, {len(cands)} candidates) ==="
         )
 
+        def predeploy_and_build_params() -> None:
+            if mode == "simulated":
+                helper = CrossBuild(
+                    repo_path=Path(s.rust_repo_path),
+                    target_triple="",  # host build for simulated
+                    binary_name=s.binary_name or "node",
+                )
+                bin_path = helper.expected_binary_path()
+                if not bin_path.exists():
+                    self._sweep_line.emit(
+                        f"[build] host binary missing at {bin_path} -- building..."
+                    )
+                    rc, built = self._blocking_build(helper)
+                    if rc != 0 or built is None:
+                        self._sweep_line.emit("[build] aborted: build failed")
+                        self._predeploy_failed.emit()
+                        return
+                    bin_path = built
+                work_dir = Path(s.session_log_dir) / "timing_sweep"
+                work_dir.mkdir(parents=True, exist_ok=True)
+                params = SweepParams(
+                    candidates_ms=cands,
+                    nominal=self.nominal.value(),
+                    minimum=self.minimum.value(),
+                    measure_s=self.measure_s.value(),
+                    setup_timeout_s=self.setup_timeout_s.value(),
+                    max_overrun_fraction=self.max_overrun_frac.value(),
+                    overrun_tolerance_pct=self.overrun_tolerance_pct.value(),
+                    diag_group=s.diag_group, diag_port=s.diag_port,
+                    op_group=s.op_group, op_port=s.op_port,
+                    interface_ip=s.interface_ip,
+                    local_binary=bin_path,
+                    local_work_dir=work_dir,
+                )
+            else:
+                bin_path = self._build_and_push_binary(hw_nodes, s, self._sweep_line.emit)
+                if bin_path is None:
+                    self._predeploy_failed.emit()
+                    return
+                params = SweepParams(
+                    candidates_ms=cands,
+                    # Derived from the enabled hardware nodes, not the
+                    # spinbox -- a manually-set nominal that drifts out
+                    # of sync with which nodes are actually enabled was
+                    # exactly the "always blasts out 2oo3 configs" bug.
+                    nominal=len(hw_nodes),
+                    minimum=self.minimum.value(),
+                    measure_s=self.measure_s.value(),
+                    setup_timeout_s=self.setup_timeout_s.value(),
+                    max_overrun_fraction=self.max_overrun_frac.value(),
+                    overrun_tolerance_pct=self.overrun_tolerance_pct.value(),
+                    diag_group=s.diag_group, diag_port=s.diag_port,
+                    op_group=s.op_group, op_port=s.op_port,
+                    interface_ip=s.interface_ip,
+                    hardware_nodes=hw_nodes,
+                    node_interface=s.node_network_interface,
+                )
+            self._sweep_ready.emit(mode, params)
+
+        threading.Thread(
+            target=predeploy_and_build_params, name="sweep-predeploy", daemon=True,
+        ).start()
+
+    @Slot()
+    def _on_predeploy_failed(self) -> None:
+        self.start_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+
+    @Slot(str, object)
+    def _on_sweep_ready(self, mode: str, params) -> None:
         self._sweep = TimingSweep(
             mode=mode, params=params,
             on_line=lambda ln: self._sweep_line.emit(ln),
             on_result=lambda r: self._sweep_result.emit(r),
             on_done=lambda smallest: self._sweep_done.emit(smallest),
         )
+        self.cancel_btn.setEnabled(True)
         self._sweep.start()
 
     def _on_cancel_sweep(self) -> None:

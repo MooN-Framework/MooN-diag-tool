@@ -31,6 +31,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Optional
@@ -56,15 +57,20 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.cross_compile import CrossBuild
+from ..core.os_open import OpenError, open_path
 from ..core.scenario_meta import ScenarioMeta, analyze_scenarios, infeasible_reason
 from ..core.ssh_deploy import (
     HardwareNode,
     SshError,
+    enabled_nodes,
+    is_process_running,
     nodes_from_json,
     nodes_to_json,
     scp_bytes,
     scp_file,
+    scp_get,
     ssh_exec,
+    tail_remote_log,
 )
 from .hardware_nodes_dialog import HardwareNodesDialog
 
@@ -148,6 +154,7 @@ def _colorize(line: str) -> str:
 
 class TestTab(QWidget):
     line_received = Signal(str)
+    _fetch_logs_done = Signal(bool)
 
     def __init__(self, settings_provider, settings_saver, parent=None) -> None:
         """
@@ -164,6 +171,7 @@ class TestTab(QWidget):
 
         self._build()
         self.line_received.connect(self._append_line)
+        self._fetch_logs_done.connect(self._on_fetch_logs_done)
 
     def _build(self) -> None:
         outer = QVBoxLayout(self)
@@ -202,6 +210,13 @@ class TestTab(QWidget):
         self.hw_nodes_btn = QPushButton("Configure hardware nodes…")
         self.hw_nodes_btn.clicked.connect(self._open_nodes_dialog)
         hw_row.addWidget(self.hw_nodes_btn)
+        self.fetch_logs_btn = QPushButton("Fetch + open node logs")
+        self.fetch_logs_btn.setToolTip(
+            "SCP each configured node's remote_log file back to "
+            "<session logs>/hardware-node-logs/ and open that folder."
+        )
+        self.fetch_logs_btn.clicked.connect(self._on_fetch_logs)
+        hw_row.addWidget(self.fetch_logs_btn)
         self.deploy_chk = QCheckBox("Deploy binary + config before run")
         self.deploy_chk.setChecked(True)
         self.deploy_chk.setToolTip(
@@ -285,9 +300,9 @@ class TestTab(QWidget):
 
     def _current_mode(self) -> str:
         """Mode is derived, not chosen: hardware iff at least one hardware
-        node is configured, simulated otherwise."""
+        node is both configured and enabled, simulated otherwise."""
         s = self._get_settings()
-        return "hardware" if nodes_from_json(s.hardware_nodes_json) else "simulated"
+        return "hardware" if enabled_nodes(nodes_from_json(s.hardware_nodes_json)) else "simulated"
 
     def _sync_mode_ui(self) -> None:
         is_hw = self._current_mode() == "hardware"
@@ -300,11 +315,11 @@ class TestTab(QWidget):
     def _refresh_hw_summary(self) -> None:
         s = self._get_settings()
         nodes = nodes_from_json(s.hardware_nodes_json)
+        enabled = enabled_nodes(nodes)
         if nodes:
-            hosts = ", ".join(
-                f"{n.node_id}:{n.host}" for n in sorted(nodes, key=lambda n: n.node_id)
-            )
-            self.hw_summary.setText(f"{len(nodes)} node(s) — {hosts}")
+            hosts = ", ".join(f"{n.node_id}:{n.host}" for n in enabled)
+            suffix = f" — {hosts}" if hosts else " — none enabled"
+            self.hw_summary.setText(f"{len(enabled)}/{len(nodes)} enabled{suffix}")
         else:
             self.hw_summary.setText("no hardware nodes configured")
 
@@ -318,6 +333,43 @@ class TestTab(QWidget):
             self._save_settings(new)
             self._append_line(f"[nodes] saved {len(updated)} hardware node(s)")
             self._sync_mode_ui()
+
+    def _on_fetch_logs(self) -> None:
+        s = self._get_settings()
+        nodes = nodes_from_json(s.hardware_nodes_json)
+        if not nodes:
+            QMessageBox.warning(self, "No nodes",
+                                "Configure hardware nodes first.")
+            return
+        target_dir = Path(s.session_log_dir) / "hardware-node-logs"
+        self.fetch_logs_btn.setEnabled(False)
+        self._append_line(f"\n=== fetching logs for {len(nodes)} node(s) → {target_dir} ===")
+
+        def worker() -> None:
+            ok_any = False
+            for hn in sorted(nodes, key=lambda n: n.node_id):
+                local_path = target_dir / f"node{hn.node_id}_{hn.host}.log"
+                try:
+                    scp_get(hn, hn.remote_log, local_path, timeout=30.0)
+                    self.line_received.emit(f"[log] {hn.host} → {local_path}")
+                    ok_any = True
+                except SshError as e:
+                    self.line_received.emit(f"[log] {hn.host} FAILED: {e.output}")
+            self._fetch_logs_done.emit(ok_any)
+
+        threading.Thread(target=worker, name="fetch-logs", daemon=True).start()
+
+    @Slot(bool)
+    def _on_fetch_logs_done(self, ok_any: bool) -> None:
+        self.fetch_logs_btn.setEnabled(True)
+        if not ok_any:
+            return
+        s = self._get_settings()
+        target_dir = Path(s.session_log_dir) / "hardware-node-logs"
+        try:
+            open_path(target_dir)
+        except OpenError as e:
+            QMessageBox.warning(self, "Could not open folder", str(e))
 
     def _repo_root(self) -> Path:
         # __file__ = <repo>/src/diag_tool/ui/test_tab.py -> parents[3] = <repo>
@@ -348,7 +400,7 @@ class TestTab(QWidget):
 
         self._scenario_meta = analyze_scenarios(d)
         is_hw = self._current_mode() == "hardware"
-        node_count = len(nodes_from_json(self._get_settings().hardware_nodes_json))
+        node_count = len(enabled_nodes(nodes_from_json(self._get_settings().hardware_nodes_json)))
 
         for p in sorted(d.glob("test_*.py")):
             meta = self._scenario_meta[str(p)]
@@ -393,7 +445,7 @@ class TestTab(QWidget):
                     if self.scenarios_list.item(i).isSelected()]
 
         mode = self._current_mode()
-        hw_nodes = nodes_from_json(s.hardware_nodes_json) if mode == "hardware" else []
+        hw_nodes = enabled_nodes(nodes_from_json(s.hardware_nodes_json)) if mode == "hardware" else []
         node_count = len(hw_nodes)
         skipped: list[str] = []
 
@@ -565,7 +617,7 @@ class TestTab(QWidget):
                 own_id=hn.node_id, nominal=nominal, minimum=2, cycle_ms=20,
                 fabric_group=s.op_group, fabric_port=s.op_port,
                 diag_group=s.diag_group, diag_port=s.diag_port,
-                interface="lo",
+                interface=s.node_network_interface,
             )
             toml_text = render_toml_str(spec)
             self.line_received.emit(f"[deploy] {hn.host} → config {hn.remote_config}")
@@ -585,6 +637,17 @@ class TestTab(QWidget):
                 ssh_exec(hn, hn.resolved_start_cmd(), timeout=15.0)
             except SshError as e:
                 self.line_received.emit(f"[deploy] {hn.host} FAILED (start): {e.output}")
+                return False
+            # start_cmd exiting 0 only proves the shell backgrounded
+            # something -- not that it's still alive. Verify for real.
+            time.sleep(0.5)
+            if not is_process_running(hn):
+                tail = tail_remote_log(hn)
+                self.line_received.emit(
+                    f"[deploy] {hn.host} FAILED: process not running after "
+                    f"start_cmd (nohup/& exits 0 even on an immediate "
+                    f"crash) -- log tail:\n{tail}"
+                )
                 return False
         return True
 

@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTableWidget,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.diag_client import DiagTelegram
+from ..core.os_open import OpenError, open_path
 from ..core.session_logger import SessionLogger
 from ..core.wire_decoder import DecodedFrame
 
@@ -53,6 +55,9 @@ class LoggingTab(QWidget):
         self.stats_lbl = QLabel("0 / 0")
         self.stats_lbl.setProperty("muted", True)
         head.addWidget(title); head.addWidget(self.stats_lbl); head.addStretch(1)
+        self.open_logs_btn = QPushButton("Open logs folder")
+        self.open_logs_btn.clicked.connect(self._on_open_logs_folder)
+        head.addWidget(self.open_logs_btn)
         self.clear_btn = QPushButton("Clear buffer")
         self.clear_btn.setProperty("danger", True)
         self.clear_btn.clicked.connect(self._on_clear)
@@ -131,6 +136,13 @@ class LoggingTab(QWidget):
     def _on_clear(self) -> None:
         self._buf.clear()
         self.table.setRowCount(0)
+
+    def _on_open_logs_folder(self) -> None:
+        try:
+            self.session.base_dir.mkdir(parents=True, exist_ok=True)
+            open_path(self.session.base_dir)
+        except OpenError as e:
+            QMessageBox.warning(self, "Could not open folder", str(e))
 
     def _render(self) -> None:
         chan = self.chan_filter.currentText()

@@ -7,6 +7,12 @@ dependencies = [
     "PySide6>=6.7",
 	"pytest>=7",
 ]
+# System dependencies NOT covered by this file (not pip-installable):
+#   sshpass  -- required for any hardware-mode SSH/SCP action (deploy,
+#               start/stop, log fetch, node probe). `apt install sshpass`.
+#   cross    -- only if cross-compiling (Timing tab "Target triple" set
+#               to something other than the host). `cargo install cross
+#               --locked`, plus Docker or Podman running. See README.md.
 
 [project.scripts]
 diag-tool = "diag_tool.app:main"

@@ -25,6 +25,7 @@ last error message written to the callback.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -79,6 +80,15 @@ class CrossBuild:
             on_done(-1, None)
             return
 
+        if self._tool() == "cross" and not (shutil.which("docker") or shutil.which("podman")):
+            on_line(
+                "[error] cross needs a container engine, but neither `docker` "
+                "nor `podman` is on PATH -- install one and make sure it's "
+                "running before cross-compiling."
+            )
+            on_done(-1, None)
+            return
+
         cmd = self._cmd()
         env = os.environ.copy()
         env.setdefault("CARGO_TERM_COLOR", "always")  # our test-tab-style colouriser handles ANSI
@@ -109,8 +119,11 @@ class CrossBuild:
                 else:
                     on_line(f"[warn] rc=0 but binary not found at {p}")
             else:
-                on_line(f"[error] cargo exit rc={rc}")
+                hint = ""
+                if self._tool() == "cross":
+                    hint = " -- is Docker/Podman installed and running? (`cross` needs a container engine)"
+                on_line(f"[error] {self._tool()} exit rc={rc}{hint}")
             on_done(rc, path)
 
-        self._reader = threading.Thread(target=reader, name="cargo-build", daemon=True)
+        self._reader = threading.Thread(target=reader, name=f"{self._tool()}-build", daemon=True)
         self._reader.start()

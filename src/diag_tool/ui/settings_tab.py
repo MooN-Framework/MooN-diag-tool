@@ -14,12 +14,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+from ..core.os_open import OpenError, open_path
 from ..core.settings import AppSettings
 
 
@@ -57,11 +59,23 @@ class SettingsTab(QWidget):
         net = QGroupBox("Network")
         nf = QFormLayout(net); nf.setContentsMargins(12, 20, 12, 12); nf.setSpacing(10)
         self.iface = QLineEdit(s.interface_ip)
+        self.iface.setToolTip(
+            "This GUI machine's own bind address for the multicast "
+            "groups below (watching a hardware sweep, Status/Inject/Log)."
+        )
+        self.node_iface = QLineEdit(s.node_network_interface)
+        self.node_iface.setToolTip(
+            "Network interface NAME (not IP), e.g. eth0 -- baked into a "
+            "node's own config.toml on hardware deploy. This is what the "
+            "Rust binary on the Pi itself binds to, not this machine. "
+            "Simulated mode always uses 'lo' regardless of this."
+        )
         self.diag_group = QLineEdit(s.diag_group)
         self.diag_port = QSpinBox(); self.diag_port.setRange(1, 65535); self.diag_port.setValue(s.diag_port)
         self.op_group = QLineEdit(s.op_group)
         self.op_port = QSpinBox(); self.op_port.setRange(1, 65535); self.op_port.setValue(s.op_port)
         nf.addRow("Interface IP", self.iface)
+        nf.addRow("Node network interface", self.node_iface)
         nf.addRow("Diag multicast group", self.diag_group)
         nf.addRow("Diag port", self.diag_port)
         nf.addRow("Operational multicast group", self.op_group)
@@ -73,7 +87,7 @@ class SettingsTab(QWidget):
         pf = QFormLayout(paths); pf.setContentsMargins(12, 20, 12, 12); pf.setSpacing(10)
         self.session_dir = QLineEdit(s.session_log_dir)
         self.rust_repo = QLineEdit(s.rust_repo_path)
-        pf.addRow("Session logs", self._with_browse(self.session_dir))
+        pf.addRow("Session logs", self._with_browse(self.session_dir, openable=True))
         pf.addRow("Rust repository", self._with_browse(self.rust_repo))
         outer.addWidget(paths)
 
@@ -108,7 +122,7 @@ class SettingsTab(QWidget):
         outer.addLayout(btns)
         outer.addStretch(1)
 
-    def _with_browse(self, line: QLineEdit) -> QWidget:
+    def _with_browse(self, line: QLineEdit, openable: bool = False) -> QWidget:
         wrap = QWidget()
         h = QHBoxLayout(wrap); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(6)
         h.addWidget(line)
@@ -121,6 +135,17 @@ class SettingsTab(QWidget):
                 line.setText(p)
         btn.clicked.connect(pick)
         h.addWidget(btn)
+        if openable:
+            open_btn = QPushButton("Open")
+            def do_open() -> None:
+                try:
+                    p = Path(line.text() or ".")
+                    p.mkdir(parents=True, exist_ok=True)
+                    open_path(p)
+                except OpenError as e:
+                    QMessageBox.warning(self, "Could not open folder", str(e))
+            open_btn.clicked.connect(do_open)
+            h.addWidget(open_btn)
         return wrap
 
     def _on_apply(self) -> None:
@@ -133,6 +158,7 @@ class SettingsTab(QWidget):
             op_group=self.op_group.text().strip(),
             op_port=self.op_port.value(),
             interface_ip=self.iface.text().strip(),
+            node_network_interface=self.node_iface.text().strip() or "eth0",
             session_log_dir=self.session_dir.text().strip(),
             rust_repo_path=self.rust_repo.text().strip(),
             scenarios_path="",  # obsolete: tests live in this repo now

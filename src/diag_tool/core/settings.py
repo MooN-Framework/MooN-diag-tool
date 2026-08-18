@@ -23,6 +23,13 @@ class AppSettings:
     op_port: int = 5555
     # Common
     interface_ip: str = "127.0.0.1"
+    # Network interface NAME (not IP) baked into a node's own config.toml
+    # ([transport]/[diagnostic] interface=) for hardware deploys -- this is
+    # what the Rust binary on the Pi binds its multicast sockets to.
+    # Distinct from interface_ip above, which is this GUI machine's own
+    # bind address for watching the sweep. Simulated mode always uses "lo"
+    # (local subprocess nodes on loopback) regardless of this setting.
+    node_network_interface: str = "eth0"
     # Paths
     session_log_dir: str = str(Path.home() / "diag-tool-sessions")
     rust_repo_path: str = ""          # location of the Rust node repo (for cargo build)

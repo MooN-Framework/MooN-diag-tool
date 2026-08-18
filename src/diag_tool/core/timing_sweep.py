@@ -27,7 +27,15 @@ from typing import Callable, Optional
 
 from .diag_client import DiagClient
 from .operational_listener import OperationalListener
-from .ssh_deploy import HardwareNode, SshError, scp_bytes, scp_file, ssh_exec
+from .ssh_deploy import (
+    HardwareNode,
+    SshError,
+    is_process_running,
+    scp_bytes,
+    scp_file,
+    ssh_exec,
+    tail_remote_log,
+)
 from .timing_measure import CycleMeasurement
 
 # The test harness lives alongside the diag tool in the same repo now,
@@ -66,6 +74,7 @@ class SweepParams:
     local_work_dir: Optional[Path] = None
     # hardware only
     hardware_nodes: list[HardwareNode] = field(default_factory=list)
+    node_interface: str = "eth0"  # interface NAME baked into the node's config.toml
 
 
 @dataclass
@@ -314,7 +323,7 @@ class TimingSweep:
                 fabric_port=self.p.op_port,
                 diag_group=self.p.diag_group,
                 diag_port=self.p.diag_port,
-                interface="lo",
+                interface="lo",  # simulated nodes are local subprocesses on loopback -- always "lo"
             )
             cfg_path = render_config(spec, cfg_dir / f"node_{own_id}.toml")
             log_path = log_dir / f"node_{own_id}.log"
@@ -370,7 +379,7 @@ class TimingSweep:
                 fabric_port=self.p.op_port,
                 diag_group=self.p.diag_group,
                 diag_port=self.p.diag_port,
-                interface="lo",  # node's own view; hardware uses eth by config
+                interface=self.p.node_interface,  # e.g. "eth0" -- the node's own interface, not this machine's
             )
             toml_text = render_config_to_str(spec)
             self.on_line(f"[{hn.host}] deploying config → {hn.remote_config}")
@@ -387,6 +396,16 @@ class TimingSweep:
                 raise RuntimeError(
                     f"[{hn.host}] start_cmd failed: {e.output}"
                 ) from e
+            # start_cmd exiting 0 only proves the shell backgrounded
+            # something -- not that it's still alive. Verify for real.
+            time.sleep(0.5)
+            if not is_process_running(hn):
+                tail = tail_remote_log(hn)
+                raise RuntimeError(
+                    f"[{hn.host}] process not running after start_cmd "
+                    f"(nohup/& exits 0 even on an immediate crash) -- "
+                    f"log tail:\n{tail}"
+                )
 
     def _hw_stop(self) -> None:
         for hn in self.p.hardware_nodes:
