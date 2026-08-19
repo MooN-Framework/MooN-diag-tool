@@ -117,7 +117,7 @@ def _password_ssh_opts() -> list[str]:
     ]
 
 
-def ssh_exec(node: HardwareNode, remote_cmd: str, timeout: float = 15.0) -> str:
+def ssh_exec(node: HardwareNode, remote_cmd: str, timeout: float = 30.0) -> str:
     """Run one shell command on the node, return combined stdout+stderr."""
     sshpass = _require_sshpass()
     cmd = [
@@ -142,7 +142,7 @@ def ssh_exec(node: HardwareNode, remote_cmd: str, timeout: float = 15.0) -> str:
 
 
 def scp_file(node: HardwareNode, local_path: Path, remote_path: str,
-             timeout: float = 30.0) -> None:
+             timeout: float = 60.0) -> None:
     sshpass = _require_sshpass()
     cmd = [
         sshpass, "-e", "scp",
@@ -164,7 +164,7 @@ def scp_file(node: HardwareNode, local_path: Path, remote_path: str,
 
 
 def scp_bytes(node: HardwareNode, data: bytes, remote_path: str,
-              timeout: float = 30.0) -> None:
+              timeout: float = 60.0) -> None:
     """Convenience: write bytes to a temp file, scp it, delete."""
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         tmp.write(data)
@@ -179,7 +179,7 @@ def scp_bytes(node: HardwareNode, data: bytes, remote_path: str,
 
 
 def scp_get(node: HardwareNode, remote_path: str, local_path: Path,
-            timeout: float = 30.0) -> None:
+            timeout: float = 60.0) -> None:
     """Pull a file FROM the node to local_path -- reverse direction of
     scp_file. Used to fetch a node's remote_log back for inspection."""
     sshpass = _require_sshpass()
@@ -203,7 +203,7 @@ def scp_get(node: HardwareNode, remote_path: str, local_path: Path,
         raise SshError(cmd, p.returncode, (p.stdout or "") + (p.stderr or ""))
 
 
-def is_process_running(node: HardwareNode, timeout: float = 8.0) -> bool:
+def is_process_running(node: HardwareNode, timeout: float = 15.0) -> bool:
     """Best-effort post-start liveness check via `ps aux | grep`.
 
     `start_cmd`'s default `nohup {bin} ... & disown` almost always
@@ -226,7 +226,7 @@ def is_process_running(node: HardwareNode, timeout: float = 8.0) -> bool:
     return bool(out.strip())
 
 
-def tail_remote_log(node: HardwareNode, lines: int = 20, timeout: float = 8.0) -> str:
+def tail_remote_log(node: HardwareNode, lines: int = 20, timeout: float = 15.0) -> str:
     """Last few lines of a node's remote_log -- for surfacing *why* a
     start failed instead of just reporting silence."""
     cmd = f"tail -n {lines} {shlex.quote(node.remote_log)} 2>&1 || echo '(no log at {node.remote_log})'"
@@ -239,7 +239,7 @@ def tail_remote_log(node: HardwareNode, lines: int = 20, timeout: float = 8.0) -
 def check_reachable(node: HardwareNode) -> tuple[bool, str]:
     """Quick liveness check: `ssh host echo ok`. Returns (ok, message)."""
     try:
-        out = ssh_exec(node, "echo ok", timeout=8.0)
+        out = ssh_exec(node, "echo ok", timeout=15.0)
         return (out.strip() == "ok", out.strip() or "ok")
     except SshError as e:
         return (False, e.output or str(e))

@@ -629,12 +629,12 @@ class TestTab(QWidget):
                 self.line_received.emit(f"[deploy] {hn.host} FAILED (transfer): {e.output}")
                 return False
             try:
-                ssh_exec(hn, hn.resolved_stop_cmd(), timeout=10.0)
+                ssh_exec(hn, hn.resolved_stop_cmd(), timeout=30.0)
             except SshError as e:
                 self.line_received.emit(f"[deploy] {hn.host} stop_cmd failed (continuing): {e.output}")
             self.line_received.emit(f"[deploy] {hn.host} starting")
             try:
-                ssh_exec(hn, hn.resolved_start_cmd(), timeout=15.0)
+                ssh_exec(hn, hn.resolved_start_cmd(), timeout=30.0)
             except SshError as e:
                 self.line_received.emit(f"[deploy] {hn.host} FAILED (start): {e.output}")
                 return False

@@ -87,8 +87,22 @@ class SettingsTab(QWidget):
         pf = QFormLayout(paths); pf.setContentsMargins(12, 20, 12, 12); pf.setSpacing(10)
         self.session_dir = QLineEdit(s.session_log_dir)
         self.rust_repo = QLineEdit(s.rust_repo_path)
+        self.pi_gen_repo = QLineEdit(s.moon_pi_gen_repo_path)
+        self.pi_gen_repo.setToolTip(
+            "Checkout of the pi-gen/moon-pi-images repo -- needed to locate "
+            "tools/build-moon-package.sh for the Package tab."
+        )
+        self.signing_key = QLineEdit(s.moon_signing_key_path)
+        self.signing_key.setToolTip(
+            "Path to the ed25519 private signing key .pem used by the "
+            "Package tab to sign .moonpkg packages (openssl pkeyutl -sign). "
+            "Only prod (signed) packages are supported -- keep this key off "
+            "the nodes themselves, it's not something they need."
+        )
         pf.addRow("Session logs", self._with_browse(self.session_dir, openable=True))
         pf.addRow("Rust repository", self._with_browse(self.rust_repo))
+        pf.addRow("pi-gen repository", self._with_browse(self.pi_gen_repo))
+        pf.addRow("Package signing key", self._with_browse(self.signing_key, is_file=True))
         outer.addWidget(paths)
 
         # Test mode -- no longer a manual choice, see Test/Timing tab:
@@ -122,15 +136,20 @@ class SettingsTab(QWidget):
         outer.addLayout(btns)
         outer.addStretch(1)
 
-    def _with_browse(self, line: QLineEdit, openable: bool = False) -> QWidget:
+    def _with_browse(self, line: QLineEdit, openable: bool = False, is_file: bool = False) -> QWidget:
         wrap = QWidget()
         h = QHBoxLayout(wrap); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(6)
         h.addWidget(line)
         btn = QPushButton("…"); btn.setFixedWidth(36)
         def pick() -> None:
-            p = QFileDialog.getExistingDirectory(
-                self, "Choose directory", line.text() or str(Path.home())
-            )
+            if is_file:
+                p, _ = QFileDialog.getOpenFileName(
+                    self, "Choose file", line.text() or str(Path.home())
+                )
+            else:
+                p = QFileDialog.getExistingDirectory(
+                    self, "Choose directory", line.text() or str(Path.home())
+                )
             if p:
                 line.setText(p)
         btn.clicked.connect(pick)
@@ -161,6 +180,8 @@ class SettingsTab(QWidget):
             node_network_interface=self.node_iface.text().strip() or "eth0",
             session_log_dir=self.session_dir.text().strip(),
             rust_repo_path=self.rust_repo.text().strip(),
+            moon_pi_gen_repo_path=self.pi_gen_repo.text().strip(),
+            moon_signing_key_path=self.signing_key.text().strip(),
             scenarios_path="",  # obsolete: tests live in this repo now
         )
         self.settings_applied.emit(s)

@@ -43,6 +43,11 @@ class AppSettings:
     build_features: str = "diagnostic"  # required for the JSON diag channel
     # Hardware nodes: JSON-encoded list of HardwareNode dicts.
     hardware_nodes_json: str = "[]"
+    # MooN package building (Package tab) -- see tools/build-moon-package.sh
+    # and stage6-moon/03-moon-package-service/files/moon-pkg-load.sh in the
+    # pi-gen repo for the exact format this has to match.
+    moon_pi_gen_repo_path: str = ""   # pi-gen/moon-pi-images checkout (for tools/build-moon-package.sh)
+    moon_signing_key_path: str = ""   # ed25519 private key .pem used to sign packages -- keep this OFF the nodes themselves
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

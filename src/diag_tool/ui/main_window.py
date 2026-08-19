@@ -21,6 +21,7 @@ from ..core.wire_decoder import DecodedFrame
 from .config_tab import ConfigTab
 from .inject_tab import InjectTab
 from .logging_tab import LoggingTab
+from .package_tab import PackageTab
 from .settings_tab import SettingsTab
 from .status_tab import StatusTab
 from .test_tab import TestTab
@@ -63,6 +64,10 @@ class MainWindow(QMainWindow):
             settings_saver=self._apply_settings,
         )
         self.config_tab = ConfigTab(lambda: self.settings)
+        self.package_tab = PackageTab(
+            settings_provider=lambda: self.settings,
+            settings_saver=self._apply_settings,
+        )
         self.settings_tab = SettingsTab(lambda: self.settings)
         self.settings_tab.settings_applied.connect(self._apply_settings)
 
@@ -71,6 +76,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.logging_tab, "Log")
         self.tabs.addTab(self.test_tab, "Tests")
         self.tabs.addTab(self.timing_tab, "Timing")
+        self.tabs.addTab(self.package_tab, "Package")
         self.tabs.addTab(self.config_tab, "Config")
         self.tabs.addTab(self.settings_tab, "Settings")
 

@@ -386,12 +386,12 @@ class TimingSweep:
             scp_bytes(hn, toml_text.encode(), hn.remote_config)
             # stop first (best-effort, ignore failures), then start
             try:
-                ssh_exec(hn, hn.resolved_stop_cmd(), timeout=10.0)
+                ssh_exec(hn, hn.resolved_stop_cmd(), timeout=30.0)
             except SshError as e:
                 self.on_line(f"[{hn.host}] stop_cmd failed (continuing): {e.output}")
             self.on_line(f"[{hn.host}] starting")
             try:
-                ssh_exec(hn, hn.resolved_start_cmd(), timeout=15.0)
+                ssh_exec(hn, hn.resolved_start_cmd(), timeout=30.0)
             except SshError as e:
                 raise RuntimeError(
                     f"[{hn.host}] start_cmd failed: {e.output}"
@@ -410,6 +410,6 @@ class TimingSweep:
     def _hw_stop(self) -> None:
         for hn in self.p.hardware_nodes:
             try:
-                ssh_exec(hn, hn.resolved_stop_cmd(), timeout=10.0)
+                ssh_exec(hn, hn.resolved_stop_cmd(), timeout=30.0)
             except SshError as e:
                 self.on_line(f"[{hn.host}] stop failed (ignored): {e.output}")
