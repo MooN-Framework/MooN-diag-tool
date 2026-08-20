@@ -63,18 +63,15 @@ def wait_node_died(fabric: Fabric, node_id: int, timeout: float = 5.0) -> bool:
     """
     Wartet bis ein Node nicht mehr antwortet.
 
-    Frueher ueber Node.is_running() (Prozess-Poll) -- das funktioniert nur
-    im simulierten Modus, da Fabric.nodes im Hardware-Modus nur _NullNode-
-    Stubs enthaelt (is_running() liefert dort immer True, siehe
-    conftest.py::_HardwareFabric).
-
-    Jetzt stattdessen ueber GetStatus auf fabric.diag: liefert der Node
-    dort nicht mehr innerhalb des Timeouts, gilt er als tot. Das
-    funktioniert identisch fuer simulierte UND Hardware-Nodes, da beide
-    Fabric-Implementierungen ein `.diag` mit derselben DiagClient-API
-    bereitstellen -- und ist ausserdem der semantisch richtigere Check
-    (der eigentlich interessierende Zustand ist "reagiert nicht mehr",
-    nicht "Prozess existiert nicht mehr").
+    Ueber GetStatus auf fabric.diag statt Node.is_running() (Prozess-
+    Poll): liefert der Node dort nicht mehr innerhalb des Timeouts,
+    gilt er als tot. Das funktioniert identisch fuer simulierte UND
+    Hardware-Nodes (harness.hw_node.RemoteNode.is_running() macht
+    zwar inzwischen auch einen echten SSH-Liveness-Check moeglich,
+    aber GetStatus bleibt hier bewusst die Quelle der Wahrheit -- der
+    eigentlich interessierende Zustand ist "reagiert nicht mehr im
+    laufenden System", nicht "Betriebssystem-Prozess existiert nicht
+    mehr").
     """
     assert fabric.diag
     deadline = time.monotonic() + timeout

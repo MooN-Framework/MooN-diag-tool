@@ -49,23 +49,44 @@ class HardwareNode:
     password: str = ""                        # required -- see module docstring
     remote_binary: str = "/opt/voting/node"
     remote_config: str = "/opt/voting/node.toml"
-    remote_log: str = "/opt/voting/node.log"   # stdout+stderr target of start_cmd
-    # Commands run via ssh. `{bin}`/`{cfg}`/`{log}` are substituted with
-    # remote_binary/remote_config/remote_log. Default is plain process
-    # management (kill + exec the binary directly) rather than a
-    # systemd unit -- there's no service installed on the node images.
-    # Both stay per-node editable strings so a future deployment (e.g.
-    # once a systemd unit does exist) can switch back without a code
-    # change: e.g. start_cmd="systemctl restart voting-node",
+    remote_log: str = "/opt/voting/node.log"   # raw stdout+stderr target of start_cmd (pre-tracing-init
+                                                # failures, panics -- see module docstring)
+    remote_log_dir: str = "/opt/voting/logs"   # passed as the node binary's `--log-dir` (file-logging
+                                                # support added to the framework for HW deployment): holds
+                                                # `node_<id>_session_<session>.log` per run plus a stable
+                                                # `node_<id>_current.log` symlink to the latest one.
+    # Commands run via ssh. `{bin}`/`{cfg}`/`{log}`/`{log_dir}` are
+    # substituted with remote_binary/remote_config/remote_log/
+    # remote_log_dir. Default is plain process management (kill + exec
+    # the binary directly) rather than a systemd unit -- there's no
+    # service installed on the node images. `--log-dir {log_dir}`
+    # enables the framework's own per-session file logging; `{log}`
+    # stays as a raw stdout+stderr catch-all (covers anything printed
+    # before the tracing subscriber is initialized, e.g. a config-load
+    # failure, plus the default Rust panic hook). Both stay per-node
+    # editable strings so a future deployment (e.g. once a systemd unit
+    # does exist) can switch back without a code change: e.g.
+    # start_cmd="systemctl restart voting-node",
     # stop_cmd="systemctl stop voting-node || true".
-    start_cmd: str = "nohup {bin} --config {cfg} > {log} 2>&1 < /dev/null & disown"
+    start_cmd: str = "nohup {bin} --config {cfg} --log-dir {log_dir} > {log} 2>&1 < /dev/null & disown"
     stop_cmd: str = "pkill -f {bin} || true"
 
     def resolved_start_cmd(self) -> str:
-        return self.start_cmd.format(bin=self.remote_binary, cfg=self.remote_config, log=self.remote_log)
+        return self.start_cmd.format(
+            bin=self.remote_binary, cfg=self.remote_config,
+            log=self.remote_log, log_dir=self.remote_log_dir,
+        )
 
     def resolved_stop_cmd(self) -> str:
-        return self.stop_cmd.format(bin=self.remote_binary, cfg=self.remote_config, log=self.remote_log)
+        return self.stop_cmd.format(
+            bin=self.remote_binary, cfg=self.remote_config,
+            log=self.remote_log, log_dir=self.remote_log_dir,
+        )
+
+    def current_log_path(self) -> str:
+        """Remote path of the `--log-dir` "current session" symlink
+        (see node.rs: `<log_dir>/node_<own_id>_current.log`)."""
+        return f"{self.remote_log_dir.rstrip('/')}/node_{self.node_id}_current.log"
 
 
 def enabled_nodes(nodes: list[HardwareNode]) -> list[HardwareNode]:
@@ -115,6 +136,68 @@ def _password_ssh_opts() -> list[str]:
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ConnectTimeout=8",
     ]
+
+
+def spawn_tail_process(node: HardwareNode, remote_path: str) -> subprocess.Popen:
+    """Spawn a persistent `ssh ... tail -n +1 -F <remote_path>` subprocess
+    and return it (stdout=PIPE, text mode, line-buffered) for the caller
+    to read line-by-line, same shape as a local Popen's stdout.
+
+    Used by the hardware test fabric (harness/hw_node.py) to stream a
+    node's `--log-dir` current-session log the same way harness/node.py
+    streams a local subprocess's stdout -- this is what lets
+    Node.wait_for_log() work against real hardware.
+
+    `-F` (capital, "follow retry"), not `-f`: the framework's
+    init_logging() removes and re-creates the `node_<id>_current.log`
+    symlink (pointing at a brand-new session file) on every process
+    start, which looks like a rename/removal from `tail`'s point of
+    view. Only `-F` reopens the file by path after that instead of
+    keeping the stale, now-detached file descriptor -- so this same
+    tail process keeps working across a remote restart_node() without
+    needing to be respawned.
+
+    `-n +1` starts from the first line of whatever is already in the
+    file at connect time (mirrors Node.wait_for_log's "scan existing
+    lines first" semantics) instead of tail's default "last 10 lines".
+
+    Caller owns the returned process: terminate()/kill() it when done
+    (e.g. RemoteNode.stop()) to close the SSH connection.
+    """
+    sshpass = _require_sshpass()
+    remote_cmd = f"tail -n +1 -F {shlex.quote(remote_path)}"
+    cmd = [
+        sshpass, "-e", "ssh",
+        *_password_ssh_opts(),
+        "-p", str(node.port),
+        f"{node.user}@{node.host}", remote_cmd,
+    ]
+    return subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env=_sshpass_env(node), text=True, bufsize=1,
+    )
+
+
+def write_hw_nodes_file(nodes: list[HardwareNode], path: Path) -> None:
+    """Write `nodes` as JSON to `path` with 0600 permissions (contains
+    plaintext SSH passwords -- same sensitivity as AppSettings'
+    hardware_nodes_json, just handed to a pytest subprocess via
+    --hw-nodes-file instead of staying in-process). Creates the file
+    with restrictive permissions from the start rather than
+    chmod-after-write, so there's no window where it's
+    world/group-readable."""
+    data = nodes_to_json(nodes).encode()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
 
 
 def ssh_exec(node: HardwareNode, remote_cmd: str, timeout: float = 30.0) -> str:
@@ -203,6 +286,35 @@ def scp_get(node: HardwareNode, remote_path: str, local_path: Path,
         raise SshError(cmd, p.returncode, (p.stdout or "") + (p.stderr or ""))
 
 
+def scp_get_dir(node: HardwareNode, remote_dir: str, local_dir: Path,
+                 timeout: float = 90.0) -> None:
+    """Pull an entire remote directory back recursively (`scp -r`) --
+    used to fetch a node's whole `remote_log_dir` (all per-session log
+    files, not just the current one) for offline inspection. Silently
+    no-ops (raises SshError, caller decides how to report it) if the
+    directory doesn't exist yet, e.g. the node has never been started
+    with --log-dir."""
+    sshpass = _require_sshpass()
+    local_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sshpass, "-e", "scp", "-r",
+        *_password_ssh_opts(),
+        "-P", str(node.port),
+        f"{node.user}@{node.host}:{remote_dir}", str(local_dir),
+    ]
+    try:
+        p = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, check=False,
+            env=_sshpass_env(node),
+        )
+    except subprocess.TimeoutExpired as e:
+        raise SshError(cmd, -1, f"timeout after {timeout}s") from e
+    except FileNotFoundError as e:
+        raise SshError(cmd, -1, f"could not start scp/sshpass: {e}") from e
+    if p.returncode != 0:
+        raise SshError(cmd, p.returncode, (p.stdout or "") + (p.stderr or ""))
+
+
 def is_process_running(node: HardwareNode, timeout: float = 15.0) -> bool:
     """Best-effort post-start liveness check via `ps aux | grep`.
 
@@ -227,13 +339,47 @@ def is_process_running(node: HardwareNode, timeout: float = 15.0) -> bool:
 
 
 def tail_remote_log(node: HardwareNode, lines: int = 20, timeout: float = 15.0) -> str:
-    """Last few lines of a node's remote_log -- for surfacing *why* a
-    start failed instead of just reporting silence."""
+    """Last few lines of a node's raw remote_log (stdout+stderr of
+    start_cmd) -- for surfacing *why* a start failed instead of just
+    reporting silence. Catches anything printed before the tracing
+    subscriber comes up (config-load errors, panics); for everything
+    after that, tail_remote_current_log gives the nicer formatted
+    output."""
     cmd = f"tail -n {lines} {shlex.quote(node.remote_log)} 2>&1 || echo '(no log at {node.remote_log})'"
     try:
         return ssh_exec(node, cmd, timeout=timeout)
     except SshError as e:
         return f"(could not read log: {e.output})"
+
+
+def tail_remote_current_log(node: HardwareNode, lines: int = 20, timeout: float = 15.0) -> str:
+    """Last few lines of the node binary's own structured file log
+    (`--log-dir`'s `node_<id>_current.log` symlink) -- has levels,
+    target and thread ids, and (unlike remote_log) isn't truncated by
+    a `>` shell redirect on every restart since each session gets its
+    own file. Empty/missing until the node has actually started
+    file logging (e.g. old binary without --log-dir support, or the
+    log dir isn't writable)."""
+    path = node.current_log_path()
+    cmd = f"tail -n {lines} {shlex.quote(path)} 2>&1 || echo '(no log at {path})'"
+    try:
+        return ssh_exec(node, cmd, timeout=timeout)
+    except SshError as e:
+        return f"(could not read log: {e.output})"
+
+
+def tail_remote_logs(node: HardwareNode, lines: int = 20, timeout: float = 15.0) -> str:
+    """Combined tail: structured current-session log first (the useful
+    one in the common case), raw stdout/stderr catch-all appended
+    below it. Use this wherever a failure needs to be explained to the
+    user -- it's the union of what tail_remote_log and
+    tail_remote_current_log show individually."""
+    current = tail_remote_current_log(node, lines=lines, timeout=timeout)
+    raw = tail_remote_log(node, lines=lines, timeout=timeout)
+    return (
+        f"--- {node.current_log_path()} (tail) ---\n{current}\n"
+        f"--- {node.remote_log} (raw stdout/stderr, tail) ---\n{raw}"
+    )
 
 
 def check_reachable(node: HardwareNode) -> tuple[bool, str]:

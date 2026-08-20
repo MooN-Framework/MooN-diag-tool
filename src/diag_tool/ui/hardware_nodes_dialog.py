@@ -2,9 +2,15 @@
 Dialog to edit the list of hardware nodes.
 
 Each node has: enabled, node_id, host, user, port, password,
-remote_binary, remote_config, remote_log, start_cmd, stop_cmd. The
-"Test" button in the row runs a quick SSH liveness probe and shows the
-result inline.
+remote_binary, remote_config, remote_log, remote_log_dir, start_cmd,
+stop_cmd. The "Test" button in the row runs a quick SSH liveness probe
+and shows the result inline.
+
+remote_log_dir is passed to the node binary as `--log-dir` (the
+framework's file-logging support for HW deployment): per-session log
+files plus a stable "current" symlink, instead of the single
+shell-redirected remote_log file that gets overwritten on every
+restart.
 
 "Enabled" (checkbox, first column) controls whether a node actually
 participates in deploy/sweep actions and in simulated/hardware mode
@@ -37,13 +43,13 @@ from ..core.ssh_deploy import HardwareNode, check_reachable
 
 
 HEADERS = ["Enabled", "ID", "Host", "User", "Port", "Password",
-           "Remote binary", "Remote config", "Remote log",
+           "Remote binary", "Remote config", "Remote log", "Remote log dir",
            "Start cmd", "Stop cmd", "Status"]
 
 # Column indices, named so a future header re-ordering only needs
 # changes here instead of a search-and-replace over magic numbers.
 COL_ENABLED, COL_ID, COL_HOST, COL_USER, COL_PORT, COL_PASSWORD, \
-    COL_REMOTE_BINARY, COL_REMOTE_CONFIG, COL_REMOTE_LOG, \
+    COL_REMOTE_BINARY, COL_REMOTE_CONFIG, COL_REMOTE_LOG, COL_REMOTE_LOG_DIR, \
     COL_START_CMD, COL_STOP_CMD, COL_STATUS = range(len(HEADERS))
 
 
@@ -93,7 +99,8 @@ class HardwareNodesDialog(QDialog):
             COL_REMOTE_BINARY: 180,
             COL_REMOTE_CONFIG: 180,
             COL_REMOTE_LOG: 180,
-            COL_START_CMD: 220,
+            COL_REMOTE_LOG_DIR: 180,
+            COL_START_CMD: 260,
             COL_STOP_CMD: 220,
             COL_STATUS: 160,
         }
@@ -144,6 +151,7 @@ class HardwareNodesDialog(QDialog):
             COL_REMOTE_BINARY: n.remote_binary,
             COL_REMOTE_CONFIG: n.remote_config,
             COL_REMOTE_LOG: n.remote_log,
+            COL_REMOTE_LOG_DIR: n.remote_log_dir,
             COL_START_CMD: n.start_cmd,
             COL_STOP_CMD: n.stop_cmd,
         }
@@ -181,7 +189,8 @@ class HardwareNodesDialog(QDialog):
                 remote_binary=self.table.item(r, COL_REMOTE_BINARY).text() or "/opt/voting/node",
                 remote_config=self.table.item(r, COL_REMOTE_CONFIG).text() or "/opt/voting/node.toml",
                 remote_log=self.table.item(r, COL_REMOTE_LOG).text() or "/opt/voting/node.log",
-                start_cmd=self.table.item(r, COL_START_CMD).text() or "nohup {bin} --config {cfg} > {log} 2>&1 < /dev/null & disown",
+                remote_log_dir=self.table.item(r, COL_REMOTE_LOG_DIR).text() or "/opt/voting/logs",
+                start_cmd=self.table.item(r, COL_START_CMD).text() or "nohup {bin} --config {cfg} --log-dir {log_dir} > {log} 2>&1 < /dev/null & disown",
                 stop_cmd=self.table.item(r, COL_STOP_CMD).text() or "pkill -f {bin} || true",
             ))
         return out

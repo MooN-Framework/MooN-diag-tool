@@ -12,16 +12,27 @@ that call a small, fixed set of harness fixtures and helper functions
 those names is enough and stays trivially maintainable as new
 scenarios get added, without needing to import/execute anything.
 
-conftest.py's `_HardwareFabric` / `_NullNode` (see docs/harness_hardware.md)
-degrade the following in hardware mode:
-  - `restart_node` -> raises NotImplementedError (node has to be
-    restarted physically/manually)
-  - `wait_node_died` -> works uniformly in both modes since it polls
-    GetStatus via `fabric.diag` (see harness/assertions.py); no
-    hardware-specific handling needed here anymore
+conftest.py's `_HardwareFabric` (see docs/harness_hardware.md) backs
+hardware mode with harness.hw_node.RemoteNode, so both of the
+previously-degraded helper groups now actually work there, given
+--hw-nodes-file (which the diag tool's Test tab always supplies when
+it runs in hardware mode):
+  - `restart_node` -> stop_cmd/start_cmd over SSH on the real remote
+    process (see _HardwareFabric.restart_node)
   - log-pattern helpers (`any_node_reached_failsafe`,
-    `assert_exclusion_confirmed`) -> `Node.wait_for_log` is a stub in
-    hardware mode (no local log file), so these never match
+    `assert_exclusion_confirmed`, or a scenario's own
+    `node.wait_for_log(...)`) -> RemoteNode tails the node's
+    `--log-dir` current-session log over SSH, so these match the same
+    way they do against a local subprocess
+  - `wait_node_died` -> unchanged, already worked uniformly in both
+    modes since it polls GetStatus via `fabric.diag`
+
+No scenario is marked hw-"unsupported" purely for using one of these
+helpers anymore -- only a node-count mismatch (fabric_4 scenario,
+fewer than 4 hardware nodes configured) still makes one infeasible.
+restart_node() gets a lightweight informational note instead (still
+hw_status "ok") since it's worth knowing a scenario power-cycles a
+real remote process before running it unattended.
 """
 from __future__ import annotations
 
@@ -29,22 +40,21 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-# Helpers whose hardware-mode fallback (see conftest.py) makes the
-# scenario impossible to run unattended against real nodes.
-_UNSUPPORTED_HELPERS = ("restart_node",)
-
-# Helpers that rely on local log files, which don't exist in hardware
-# mode (Node.wait_for_log is a no-op stub there). Scenarios using only
-# these still run, but the corresponding assertion will never succeed.
-_LOG_PATTERN_HELPERS = ("any_node_reached_failsafe", "assert_exclusion_confirmed")
+# Informational only (hw_status stays "ok") -- worth flagging in the
+# UI, but no longer a reason to grey a scenario out.
+_RESTARTS_REAL_HARDWARE = ("restart_node",)
 
 
 @dataclass(frozen=True)
 class ScenarioMeta:
     path: Path
     required_nodes: int            # 3 or 4, from the fabric_3/fabric_4 fixture used
-    hw_status: str                 # "ok" | "needs_adaptation" | "unsupported"
-    hw_notes: tuple[str, ...]      # human-readable reasons, empty if hw_status == "ok"
+    hw_status: str                 # "ok" | "unsupported"
+    hw_notes: tuple[str, ...]      # human-readable notes, empty if none apply
+
+    @property
+    def unsupported(self) -> bool:
+        return self.hw_status == "unsupported"
 
 
 def analyze_scenario(path: Path) -> ScenarioMeta:
@@ -53,26 +63,16 @@ def analyze_scenario(path: Path) -> ScenarioMeta:
     required_nodes = 4 if re.search(r"\bfabric_4\b", text) else 3
 
     notes: list[str] = []
-    status = "ok"
 
-    if any(re.search(rf"\b{re.escape(name)}\b", text) for name in _UNSUPPORTED_HELPERS):
-        status = "unsupported"
+    if any(re.search(rf"\b{re.escape(name)}\b", text) for name in _RESTARTS_REAL_HARDWARE):
         notes.append(
-            "restart_node() -- in Hardware-Mode nicht implementiert "
-            "(Node muss manuell neu gestartet werden)"
-        )
-
-    if any(re.search(rf"\b{re.escape(name)}\b", text) for name in _LOG_PATTERN_HELPERS):
-        if status == "ok":
-            status = "needs_adaptation"
-        notes.append(
-            "nutzt Log-Pattern-Matching -- kein lokales Log in Hardware-Mode, "
-            "Assertion greift dort nicht"
+            "restart_node() -- startet den echten Node-Prozess auf der "
+            "Hardware per SSH neu (stop_cmd/start_cmd)"
         )
 
     return ScenarioMeta(
         path=path, required_nodes=required_nodes,
-        hw_status=status, hw_notes=tuple(notes),
+        hw_status="ok", hw_notes=tuple(notes),
     )
 
 

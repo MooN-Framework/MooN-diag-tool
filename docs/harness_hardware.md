@@ -1,146 +1,100 @@
 # Hardware mode for the test harness
 
-To let the diagnostic tool run the existing `scenarios/*` against real
-hardware, `conftest.py` needs to know a `--fabric` mode. The patch is
-minimally invasive: the existing `fabric_3` and `fabric_4` fixtures
-fall back to a lightweight discovery wrapper in hardware mode, without
-spawning any processes.
+`conftest.py` supports `--fabric=hardware` to run the scenarios in
+`tests/scenarios/` against real, already-deployed nodes instead of
+locally spawned processes. The diag tool's Test tab drives this
+automatically (mode is derived from whether hardware nodes are
+configured, see `HardwareNodesDialog`); this doc is for anyone running
+`pytest` by hand or wanting to know what's actually happening
+underneath.
 
-## One-time patch for `conftest.py`
+## What the Test tab passes to pytest
 
-```python
-# --- CLI options -----------------------------------------------------
-
-def pytest_addoption(parser):
-    parser.addoption("--fabric", default="simulated",
-                     choices=["simulated", "hardware"])
-    parser.addoption("--diag-group", default="239.10.0.2")
-    parser.addoption("--diag-port",  default=6666, type=int)
-    parser.addoption("--op-group",   default="239.10.0.1")
-    parser.addoption("--op-port",    default=5555, type=int)
-    parser.addoption("--interface-ip", default="127.0.0.1")
-    parser.addoption("--discovery-timeout", default=10.0, type=float)
-
-
-# --- Hardware fabric adapter ----------------------------------------
-
-class HardwareFabric:
-    """
-    Duck-typed drop-in for `harness.fabric.Fabric` in hardware mode.
-    Does not spawn any processes -- waits for the expected number of
-    nodes to show up on the diag channel instead.
-    """
-    def __init__(self, diag, expected_ids):
-        self.diag = diag
-        self.nodes = {nid: _NullNode(nid) for nid in expected_ids}
-
-    def alive_ids(self):
-        return [nid for nid, n in self.nodes.items() if n.is_running()]
-
-    def stop_all(self):
-        self.diag.close()
-
-    def restart_node(self, node_id, wait_operational=8.0):
-        raise NotImplementedError("restart_node is not implemented in "
-                                  "hardware mode -- restart the node "
-                                  "manually.")
-
-class _NullNode:
-    def __init__(self, node_id):
-        self.node_id = node_id
-        self._alive = True
-    def is_running(self):
-        # Hardware mode: no local process to poll. Tests that check for
-        # process death (wait_node_died) should instead check for missing
-        # diag responses after a shutdown injection. For simple tests:
-        # leave True.
-        return self._alive
-    def wait_for_log(self, *_a, **_kw):
-        # No local log file available. Tests that rely on log patterns
-        # (any_node_reached_failsafe) must, in hardware mode, use the
-        # diag status instead.
-        return None
-
-
-def _make_hardware_fabric(request, expected_nodes):
-    from harness.diag import DiagClient
-    diag = DiagClient(
-        multicast_group=request.config.getoption("--diag-group"),
-        port=request.config.getoption("--diag-port"),
-        interface_ip=request.config.getoption("--interface-ip"),
-    )
-    # Discovery: poll get_status on every plausible node_id until we
-    # have expected_nodes. Alternatively: listen passively on op multicast.
-    import time
-    ids = set()
-    deadline = time.monotonic() + request.config.getoption("--discovery-timeout")
-    while time.monotonic() < deadline and len(ids) < expected_nodes:
-        for candidate in range(0, expected_nodes * 4):  # try generously
-            if candidate in ids:
-                continue
-            if diag.get_status(candidate, timeout=0.3) is not None:
-                ids.add(candidate)
-                if len(ids) >= expected_nodes:
-                    break
-    if len(ids) < expected_nodes:
-        diag.close()
-        raise RuntimeError(
-            f"Discovery: only {len(ids)}/{expected_nodes} nodes reachable "
-            f"(found: {sorted(ids)})"
-        )
-    return HardwareFabric(diag, sorted(ids))
-
-
-# --- fabric_N fixtures ----------------------------------------------
-
-@pytest.fixture
-def fabric_3(request, binary, work_dir):
-    if request.config.getoption("--fabric") == "hardware":
-        f = _make_hardware_fabric(request, expected_nodes=3)
-        yield f
-        f.stop_all()
-        return
-    # otherwise as before (subprocess):
-    f = _make_fabric(binary, work_dir, nominal=3, minimum=2)
-    yield f
-    f.stop_all()
-
-
-@pytest.fixture
-def fabric_4(request, binary, work_dir):
-    if request.config.getoption("--fabric") == "hardware":
-        f = _make_hardware_fabric(request, expected_nodes=4)
-        yield f
-        f.stop_all()
-        return
-    f = _make_fabric(binary, work_dir, nominal=4, minimum=2)
-    yield f
-    f.stop_all()
-
-
-# --- binary fixture skips the cargo build in hardware mode ----------
-
-@pytest.fixture(scope="session")
-def binary(request):
-    if request.config.getoption("--fabric") == "hardware":
-        # cargo build is unnecessary -- the nodes are already running.
-        return None
-    # otherwise as before
-    ...
+```
+--fabric=hardware
+--hw-nodes-file=<tmp>.json
+--diag-group=... --diag-port=... --op-group=... --op-port=... --interface-ip=...
 ```
 
-## What tests can (and cannot) do in hardware mode
+`--hw-nodes-file` points at a JSON file (schema:
+`diag_tool.core.ssh_deploy.HardwareNode` — host, user, port, password,
+`remote_binary`/`remote_config`/`remote_log`/`remote_log_dir`,
+`start_cmd`/`stop_cmd`) with the *enabled* nodes from "Configure
+hardware nodes…". The Test tab writes it fresh before every hardware
+run (0600, via `write_hw_nodes_file`) and deletes it again once pytest
+exits, successfully or not — see `TestTab._run_worker` /
+`_run_worker_inner`. Running pytest manually needs this flag passed
+explicitly; without it `--fabric=hardware` fails fast with a clear
+error instead of silently falling back to degraded stubs.
 
-**Works out of the box:**
-- All tests that only use `fabric.diag` calls plus `wait_node_state`,
-  `wait_peer_health`, `wait_cycles_advance`.
-- All injection commands.
+## `_HardwareFabric` / `harness.hw_node.RemoteNode`
 
-**Needs adaptation or should be skipped:**
-- `wait_node_died` — no `Popen.poll` in hardware mode. Replace with:
-  after a `shutdown` injection, wait for `get_status` to time out.
-- `any_node_reached_failsafe` (log pattern) — no local log. Replace with
-  `wait_node_state(fabric, nid, "Failsafe")`.
-- `restart_node` — the node has to be restarted physically.
+`conftest.py::_make_hardware_fabric`:
+1. Loads the enabled nodes from `--hw-nodes-file`, takes the lowest
+   `node_id`s up to the scenario's required count (`fabric_3`/
+   `fabric_4`).
+2. Confirms each one actually answers `GetStatus` on the diag channel
+   within `--discovery-timeout` (no more blind candidate-id scanning
+   — the node list is known up front now).
+3. Builds one `harness.hw_node.RemoteNode` per node and calls
+   `start_tailing()` on each.
 
-A `pytest.mark`-based skip for hardware-incompatible tests helps here.
+`RemoteNode.start_tailing()` spawns a persistent
+`ssh ... tail -n +1 -F <remote_log_dir>/node_<id>_current.log`
+subprocess (`core.ssh_deploy.spawn_tail_process`) and reads its stdout
+line-by-line into the same deque-backed buffer `harness.node.Node`
+uses locally. This requires the framework's `--log-dir` file-logging
+support (added for HW deployment) — the node binary needs to have
+actually been started with `--log-dir` for `node_<id>_current.log` to
+exist. `HardwareNode`'s default `start_cmd` does this already:
+
+```
+nohup {bin} --config {cfg} --log-dir {log_dir} > {log} 2>&1 < /dev/null & disown
+```
+
+The result: `RemoteNode` exposes the exact same
+`wait_for_log()` / `log_lines` / `is_running()` / `stop()` /
+`node_id` API as the local-subprocess `Node`, so
+`harness/assertions.py` (`any_node_reached_failsafe`,
+`assert_exclusion_confirmed`) and a scenario's own direct
+`fabric_3.nodes[id].wait_for_log(...)` calls work unmodified against
+hardware.
+
+## `restart_node()` on hardware
+
+`_HardwareFabric.restart_node(node_id)` runs `resolved_stop_cmd()`
+then `resolved_start_cmd()` over SSH on the real remote process — an
+actual power-cycle of that node, not a simulation. The node's
+`RemoteNode` tail subprocess is **not** touched or respawned: `tail
+-F` (capital F, "follow retry") re-opens `node_<id>_current.log` by
+path once the framework repoints that symlink at the new session's
+file on the next start, so the same tail process — and the same
+`RemoteNode` object a test is holding — keeps streaming lines across
+the restart. That's what makes `test_t13_rejoin.py`-style scenarios
+(`fabric_3.restart_node(TARGET)` followed by
+`fabric_3.nodes[OBSERVER].wait_for_log(...)`) work the same way in
+both modes.
+
+## Fixture teardown vs. `restart_node()`
+
+`_HardwareFabric.stop_all()` (called on every `fabric_3`/`fabric_4`
+fixture teardown, i.e. after every single test) only closes the diag
+socket and terminates the local SSH tail helpers — it deliberately
+does **not** run `stop_cmd` on the remote nodes. Hardware nodes are an
+external, already-running resource shared across the whole pytest
+session (started once by the Test tab's "Deploy binary + config
+before run" step before pytest launches at all, not per-test like
+simulated nodes); killing them after each test would break the next
+one. `restart_node()` is the explicit, per-test operation for a
+scenario that actually wants a node to go down and come back.
+
+## What still doesn't apply to hardware
+
+- The `binary` fixture returns `None` in hardware mode — no local
+  cargo build, nodes are already flashed/deployed.
+- `wait_node_died` was always mode-agnostic (polls `GetStatus` via
+  `fabric.diag`), nothing hardware-specific about it.
+- A scenario needing more nodes than are currently configured+enabled
+  stays infeasible — see `core/scenario_meta.py` /
+  `infeasible_reason()`, surfaced in the Test tab's scenario list as
+  greyed-out items.

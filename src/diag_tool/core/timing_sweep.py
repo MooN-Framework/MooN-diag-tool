@@ -34,7 +34,7 @@ from .ssh_deploy import (
     scp_bytes,
     scp_file,
     ssh_exec,
-    tail_remote_log,
+    tail_remote_logs,
 )
 from .timing_measure import CycleMeasurement
 
@@ -173,8 +173,9 @@ class TimingSweep:
 
             if not operational:
                 # Surface WHY the nodes did not come up — tail their
-                # stdout log files (sim mode only; hardware users have
-                # to check remote logs themselves).
+                # logs. Simulated: local stdout log files. Hardware:
+                # the node binary's own --log-dir file log (plus the
+                # raw stdout/stderr catch-all) fetched over SSH.
                 detail_lines: list[str] = []
                 if self.mode == "simulated" and self.p.local_work_dir is not None:
                     log_dir = self.p.local_work_dir / f"cycle_{cycle_ms}ms" / "logs"
@@ -185,6 +186,10 @@ class TimingSweep:
                             continue
                         detail_lines.append(f"--- {lp.name} (tail) ---")
                         detail_lines.extend(tail)
+                elif self.mode == "hardware":
+                    for hn in sorted(self.p.hardware_nodes, key=lambda n: n.node_id):
+                        detail_lines.append(f"=== node {hn.node_id} ({hn.host}) ===")
+                        detail_lines.extend(tail_remote_logs(hn, lines=8).splitlines())
                 if detail_lines:
                     for ln in detail_lines:
                         self.on_line(ln)
@@ -400,7 +405,7 @@ class TimingSweep:
             # something -- not that it's still alive. Verify for real.
             time.sleep(0.5)
             if not is_process_running(hn):
-                tail = tail_remote_log(hn)
+                tail = tail_remote_logs(hn)
                 raise RuntimeError(
                     f"[{hn.host}] process not running after start_cmd "
                     f"(nohup/& exits 0 even on an immediate crash) -- "

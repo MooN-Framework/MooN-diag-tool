@@ -30,6 +30,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import replace
@@ -69,8 +70,10 @@ from ..core.ssh_deploy import (
     scp_bytes,
     scp_file,
     scp_get,
+    scp_get_dir,
     ssh_exec,
-    tail_remote_log,
+    tail_remote_logs,
+    write_hw_nodes_file,
 )
 from .hardware_nodes_dialog import HardwareNodesDialog
 
@@ -212,8 +215,10 @@ class TestTab(QWidget):
         hw_row.addWidget(self.hw_nodes_btn)
         self.fetch_logs_btn = QPushButton("Fetch + open node logs")
         self.fetch_logs_btn.setToolTip(
-            "SCP each configured node's remote_log file back to "
-            "<session logs>/hardware-node-logs/ and open that folder."
+            "SCP each configured node's remote_log_dir (all per-session "
+            "file logs + the 'current' symlink from --log-dir) plus the "
+            "raw remote_log back to <session logs>/hardware-node-logs/ "
+            "and open that folder."
         )
         self.fetch_logs_btn.clicked.connect(self._on_fetch_logs)
         hw_row.addWidget(self.fetch_logs_btn)
@@ -267,7 +272,7 @@ class TestTab(QWidget):
         btn_row.addWidget(self.run_btn); btn_row.addWidget(self.stop_btn)
         cl.addLayout(btn_row)
 
-        self.help_btn = QPushButton("Hardware mode: show conftest patch")
+        self.help_btn = QPushButton("Hardware mode: how it works")
         self.help_btn.clicked.connect(self._show_patch)
         cl.addWidget(self.help_btn)
         cl.addStretch(1)
@@ -348,13 +353,27 @@ class TestTab(QWidget):
         def worker() -> None:
             ok_any = False
             for hn in sorted(nodes, key=lambda n: n.node_id):
-                local_path = target_dir / f"node{hn.node_id}_{hn.host}.log"
+                # Structured per-session logs (--log-dir): the whole
+                # directory, not just "current", so earlier sessions
+                # stay available for post-mortem after a restart.
+                node_dir = target_dir / f"node{hn.node_id}_{hn.host}"
                 try:
-                    scp_get(hn, hn.remote_log, local_path, timeout=30.0)
-                    self.line_received.emit(f"[log] {hn.host} → {local_path}")
+                    scp_get_dir(hn, hn.remote_log_dir, node_dir, timeout=60.0)
+                    self.line_received.emit(f"[log] {hn.host} log dir → {node_dir}")
                     ok_any = True
                 except SshError as e:
-                    self.line_received.emit(f"[log] {hn.host} FAILED: {e.output}")
+                    self.line_received.emit(
+                        f"[log] {hn.host} log dir FAILED (no --log-dir "
+                        f"output yet?): {e.output}"
+                    )
+                # Raw stdout+stderr catch-all alongside it.
+                raw_path = target_dir / f"node{hn.node_id}_{hn.host}_raw.log"
+                try:
+                    scp_get(hn, hn.remote_log, raw_path, timeout=30.0)
+                    self.line_received.emit(f"[log] {hn.host} raw log → {raw_path}")
+                    ok_any = True
+                except SshError as e:
+                    self.line_received.emit(f"[log] {hn.host} raw log FAILED: {e.output}")
             self._fetch_logs_done.emit(ok_any)
 
         threading.Thread(target=worker, name="fetch-logs", daemon=True).start()
@@ -499,9 +518,21 @@ class TestTab(QWidget):
         if s.rust_repo_path:
             cmd.append(f"--rust-repo={s.rust_repo_path}")
 
+        hw_nodes_file: Optional[Path] = None
         if mode == "hardware":
+            # conftest's hardware fabric needs the node connection data
+            # (host/password/remote paths incl. remote_log_dir) to do
+            # SSH restart_node() and to tail each node's --log-dir
+            # current-log for wait_for_log() -- see conftest.py /
+            # harness/hw_node.py. Written fresh per run, 0600, cleaned
+            # up in _run_worker's finally.
+            fd, tmp_name = tempfile.mkstemp(prefix="diag-tool-hw-nodes-", suffix=".json")
+            os.close(fd)
+            hw_nodes_file = Path(tmp_name)
+            write_hw_nodes_file(hw_nodes, hw_nodes_file)
             cmd += [
                 "--fabric=hardware",
+                f"--hw-nodes-file={hw_nodes_file}",
                 f"--diag-group={s.diag_group}",
                 f"--diag-port={s.diag_port}",
                 f"--op-group={s.op_group}",
@@ -529,7 +560,7 @@ class TestTab(QWidget):
         self.stop_btn.setEnabled(True)
         self._reader = threading.Thread(
             target=self._run_worker,
-            args=(cmd, repo_root, env, deploy_first, s, hw_nodes),
+            args=(cmd, repo_root, env, deploy_first, s, hw_nodes, hw_nodes_file),
             name="test-run", daemon=True,
         )
         self._reader.start()
@@ -537,7 +568,19 @@ class TestTab(QWidget):
     # ---- deploy-then-run worker --------------------------------------------
 
     def _run_worker(self, cmd: list[str], repo_root: Path, env: dict,
-                     deploy_first: bool, s, hw_nodes: list[HardwareNode]) -> None:
+                     deploy_first: bool, s, hw_nodes: list[HardwareNode],
+                     hw_nodes_file: Optional[Path]) -> None:
+        try:
+            self._run_worker_inner(cmd, repo_root, env, deploy_first, s, hw_nodes)
+        finally:
+            if hw_nodes_file is not None:
+                try:
+                    hw_nodes_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _run_worker_inner(self, cmd: list[str], repo_root: Path, env: dict,
+                           deploy_first: bool, s, hw_nodes: list[HardwareNode]) -> None:
         if deploy_first:
             if not hw_nodes:
                 self.line_received.emit(
@@ -642,7 +685,7 @@ class TestTab(QWidget):
             # something -- not that it's still alive. Verify for real.
             time.sleep(0.5)
             if not is_process_running(hn):
-                tail = tail_remote_log(hn)
+                tail = tail_remote_logs(hn)
                 self.line_received.emit(
                     f"[deploy] {hn.host} FAILED: process not running after "
                     f"start_cmd (nohup/& exits 0 even on an immediate "
@@ -667,7 +710,7 @@ class TestTab(QWidget):
         doc = pkg_dir / "docs" / "harness_hardware.md"
         text = doc.read_text() if doc.exists() else "docs/harness_hardware.md not found."
         dlg = QMessageBox(self)
-        dlg.setWindowTitle("Hardware mode: conftest patch")
+        dlg.setWindowTitle("Hardware mode: how it works")
         dlg.setTextFormat(Qt.MarkdownText)
         dlg.setText(text)
         dlg.exec()
