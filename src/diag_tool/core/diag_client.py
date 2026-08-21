@@ -183,8 +183,24 @@ class DiagClient:
                 continue
             try:
                 data, _ = sock.recvfrom(8192)
-            except (BlockingIOError, OSError, AttributeError):
-                break
+            except BlockingIOError:
+                # Spurious EWOULDBLOCK after a positive select() -- this
+                # can legitimately happen on a non-blocking socket, it's
+                # not a reason to give up. The old code treated it as
+                # fatal and silently killed the whole receive thread on
+                # the very first occurrence: packets kept arriving on
+                # the wire (confirmed via tcpdump) but nothing ever
+                # reached the UI again, with no error shown anywhere.
+                continue
+            except OSError:
+                # A genuine socket error. If we're shutting down, that's
+                # expected (stop() closes the socket from under us) --
+                # exit quietly. Otherwise this is unexpected but still
+                # not necessarily fatal for the socket itself, so keep
+                # trying rather than permanently killing the thread.
+                if self._stop.is_set():
+                    break
+                continue
             try:
                 parsed = json.loads(data)
             except json.JSONDecodeError:

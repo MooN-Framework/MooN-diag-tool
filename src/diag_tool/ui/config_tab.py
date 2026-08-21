@@ -90,10 +90,19 @@ class ConfigTab(QWidget):
         self.minimum = QSpinBox(); self.minimum.setRange(1, 16); self.minimum.setValue(2)
         self.cycle_ms = QSpinBox(); self.cycle_ms.setRange(1, 10000); self.cycle_ms.setValue(20); self.cycle_ms.setSuffix(" ms")
         self.probation = QSpinBox(); self.probation.setRange(1, 10000); self.probation.setValue(10)
+        self.init_sync_timeout = QSpinBox(); self.init_sync_timeout.setRange(1, 600_000)
+        self.init_sync_timeout.setValue(2000); self.init_sync_timeout.setSuffix(" ms")
+        self.init_sync_timeout.setToolTip(
+            "How long a node waits at startup for its peers before giving "
+            "up. Real hardware often needs this much higher than the 2000 ms "
+            "default -- nodes power up at different times and boot slower "
+            "than a local/simulated run."
+        )
         pf.addRow("nominal", self.nominal)
         pf.addRow("minimum", self.minimum)
         pf.addRow("cycle_duration_ms", self.cycle_ms)
         pf.addRow("probation_cycles", self.probation)
+        pf.addRow("init_sync_timeout_ms", self.init_sync_timeout)
         ll.addWidget(part_box)
 
         # Transport / diagnostic
@@ -118,7 +127,8 @@ class ConfigTab(QWidget):
 
         # Any field change refreshes preview.
         for w in (self.nominal, self.minimum, self.cycle_ms, self.probation,
-                  self.fabric_port, self.diag_port, self.id_from, self.id_to):
+                  self.init_sync_timeout, self.fabric_port, self.diag_port,
+                  self.id_from, self.id_to):
             w.valueChanged.connect(self._on_any_change)
         for w in (self.interface, self.fabric_group, self.diag_group):
             w.textChanged.connect(self._on_any_change)
@@ -203,6 +213,7 @@ class ConfigTab(QWidget):
             diag_group=self.diag_group.text().strip() or "239.10.0.2",
             diag_port=self.diag_port.value(),
             interface=self.interface.text().strip() or "lo",
+            init_sync_timeout_ms=self.init_sync_timeout.value(),
         )
 
     def _on_any_change(self) -> None:

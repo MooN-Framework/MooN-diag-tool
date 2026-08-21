@@ -52,7 +52,9 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        self.status_tab = StatusTab(self.registry, lambda: self.diag)
+        self.status_tab = StatusTab(
+            self.registry, lambda: self.diag, settings_provider=lambda: self.settings,
+        )
         self.inject_tab = InjectTab(self.registry, lambda: self.diag)
         self.logging_tab = LoggingTab(self.session_logger)
         self.test_tab = TestTab(

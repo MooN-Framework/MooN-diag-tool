@@ -30,10 +30,12 @@ from .operational_listener import OperationalListener
 from .ssh_deploy import (
     HardwareNode,
     SshError,
+    ensure_remote_dirs,
     is_process_running,
     scp_bytes,
     scp_file,
     ssh_exec,
+    stop_moon_node_service,
     tail_remote_logs,
 )
 from .timing_measure import CycleMeasurement
@@ -372,9 +374,20 @@ class TimingSweep:
     def _hw_start(self, cycle_ms: int) -> None:
         if not self.p.hardware_nodes:
             raise RuntimeError("hardware mode requires at least one HardwareNode")
-        # For each configured hardware node, render its TOML with the
-        # current cycle_ms, SCP it into place, then run the start command.
+        # For each configured hardware node, stop moon-node.service first
+        # (best-effort -- see stop_moon_node_service docstring: without
+        # this, a node that was ever deployed to via the Package tab
+        # keeps running the production binary from /opt/moon/bin/node
+        # alongside the harness's own test binary, both fighting over
+        # the same multicast group/port), then render its TOML with the
+        # current cycle_ms, SCP it into place, and run the start command.
         for hn in self.p.hardware_nodes:
+            self.on_line(f"[{hn.host}] stopping moon-node.service (if present)")
+            stop_moon_node_service(hn)
+            try:
+                ensure_remote_dirs(hn)
+            except SshError as e:
+                raise RuntimeError(f"[{hn.host}] mkdir failed: {e.output}") from e
             spec = make_spec(
                 own_id=hn.node_id,
                 nominal=self.p.nominal,

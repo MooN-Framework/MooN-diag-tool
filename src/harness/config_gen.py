@@ -271,14 +271,24 @@ def make_spec(
     fabric_group: str = "239.10.0.1", fabric_port: int = 5555,
     diag_group: str = "239.10.0.2", diag_port: int = 6666,
     interface: str = "lo",
+    init_sync_timeout_ms: int = 2000,
 ) -> NodeSpec:
-    """Build a NodeSpec and apply scaled_timing."""
+    """Build a NodeSpec and apply scaled_timing.
+
+    init_sync_timeout_ms defaults to the same 2000ms NodeSpec used to
+    default to, kept as an explicit parameter because it often needs to
+    be much higher on real hardware than in simulated/loopback tests
+    (nodes powering up at different times, slower boot, etc.) -- unlike
+    the in-cycle offsets, it isn't derived from cycle_ms so it's passed
+    straight through rather than going via scaled_timing().
+    """
     overrides = scaled_timing(cycle_ms)
     base = NodeSpec(
         own_id=own_id, nominal=nominal, minimum=minimum,
         fabric_group=fabric_group, fabric_port=fabric_port,
         diag_group=diag_group, diag_port=diag_port,
         interface=interface,
+        init_sync_timeout_ms=init_sync_timeout_ms,
     )
     return replace(base, **overrides)
 

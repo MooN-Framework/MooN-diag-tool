@@ -64,6 +64,7 @@ from ..core.ssh_deploy import (
     HardwareNode,
     SshError,
     enabled_nodes,
+    ensure_remote_dirs,
     is_process_running,
     nodes_from_json,
     nodes_to_json,
@@ -72,6 +73,7 @@ from ..core.ssh_deploy import (
     scp_get,
     scp_get_dir,
     ssh_exec,
+    stop_moon_node_service,
     tail_remote_logs,
     write_hw_nodes_file,
 )
@@ -352,28 +354,34 @@ class TestTab(QWidget):
 
         def worker() -> None:
             ok_any = False
-            for hn in sorted(nodes, key=lambda n: n.node_id):
-                # Structured per-session logs (--log-dir): the whole
-                # directory, not just "current", so earlier sessions
-                # stay available for post-mortem after a restart.
-                node_dir = target_dir / f"node{hn.node_id}_{hn.host}"
-                try:
-                    scp_get_dir(hn, hn.remote_log_dir, node_dir, timeout=60.0)
-                    self.line_received.emit(f"[log] {hn.host} log dir → {node_dir}")
-                    ok_any = True
-                except SshError as e:
-                    self.line_received.emit(
-                        f"[log] {hn.host} log dir FAILED (no --log-dir "
-                        f"output yet?): {e.output}"
-                    )
-                # Raw stdout+stderr catch-all alongside it.
-                raw_path = target_dir / f"node{hn.node_id}_{hn.host}_raw.log"
-                try:
-                    scp_get(hn, hn.remote_log, raw_path, timeout=30.0)
-                    self.line_received.emit(f"[log] {hn.host} raw log → {raw_path}")
-                    ok_any = True
-                except SshError as e:
-                    self.line_received.emit(f"[log] {hn.host} raw log FAILED: {e.output}")
+            try:
+                for hn in sorted(nodes, key=lambda n: n.node_id):
+                    # Structured per-session logs (--log-dir): the whole
+                    # directory, not just "current", so earlier sessions
+                    # stay available for post-mortem after a restart.
+                    node_dir = target_dir / f"node{hn.node_id}_{hn.host}"
+                    try:
+                        scp_get_dir(hn, hn.remote_log_dir, node_dir, timeout=60.0)
+                        self.line_received.emit(f"[log] {hn.host} log dir → {node_dir}")
+                        ok_any = True
+                    except SshError as e:
+                        self.line_received.emit(
+                            f"[log] {hn.host} log dir FAILED (no --log-dir "
+                            f"output yet?): {e.output}"
+                        )
+                    # Raw stdout+stderr catch-all alongside it.
+                    raw_path = target_dir / f"node{hn.node_id}_{hn.host}_raw.log"
+                    try:
+                        scp_get(hn, hn.remote_log, raw_path, timeout=30.0)
+                        self.line_received.emit(f"[log] {hn.host} raw log → {raw_path}")
+                        ok_any = True
+                    except SshError as e:
+                        self.line_received.emit(f"[log] {hn.host} raw log FAILED: {e.output}")
+            except Exception as e:
+                # Safety net -- see _run_worker's comment: without this,
+                # any unexpected error here would leave fetch_logs_btn
+                # disabled forever with no visible error.
+                self.line_received.emit(f"[log] unexpected {type(e).__name__}: {e}")
             self._fetch_logs_done.emit(ok_any)
 
         threading.Thread(target=worker, name="fetch-logs", daemon=True).start()
@@ -572,6 +580,15 @@ class TestTab(QWidget):
                      hw_nodes_file: Optional[Path]) -> None:
         try:
             self._run_worker_inner(cmd, repo_root, env, deploy_first, s, hw_nodes)
+        except Exception as e:
+            # Safety net: an unhandled exception anywhere in
+            # _run_worker_inner (e.g. an unexpected error inside
+            # _deploy_to_hardware/_blocking_build/CrossBuild) used to
+            # kill this background thread silently without ever
+            # emitting __RUN_DONE__ -- Start/Stop then stayed stuck in
+            # "running" state forever with no visible error anywhere.
+            self.line_received.emit(f"[error] unexpected {type(e).__name__}: {e}")
+            self.line_received.emit("__RUN_DONE__")
         finally:
             if hw_nodes_file is not None:
                 try:
@@ -653,9 +670,26 @@ class TestTab(QWidget):
         """Push the built binary + a freshly rendered config to every
         node, then (re)start it via its configured start_cmd. Same
         push/stop/start sequence as TimingSweep._hw_start, generalised
-        for a plain test run instead of a cycle-duration sweep."""
+        for a plain test run instead of a cycle-duration sweep.
+
+        Preparation phase first: stop moon-node.service on every node.
+        If this node was ever deployed to via the Package tab, that
+        systemd unit is still running the production binary from
+        /opt/moon/bin/node -- resolved_stop_cmd() below only pkill's
+        HardwareNode.remote_binary (default /opt/voting/node), a
+        different path, so without this the production binary keeps
+        running alongside the harness's test binary and both fight
+        over the same multicast group/port.
+        """
         nominal = len(nodes)
         for hn in sorted(nodes, key=lambda n: n.node_id):
+            self.line_received.emit(f"[deploy] {hn.host} stopping moon-node.service (if present)")
+            stop_moon_node_service(hn)
+            try:
+                ensure_remote_dirs(hn)
+            except SshError as e:
+                self.line_received.emit(f"[deploy] {hn.host} FAILED (mkdir): {e.output}")
+                return False
             spec = make_spec(
                 own_id=hn.node_id, nominal=nominal, minimum=2, cycle_ms=20,
                 fabric_group=s.op_group, fabric_port=s.op_port,

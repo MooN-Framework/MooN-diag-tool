@@ -33,10 +33,28 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.node_registry import NodeRegistry
+from ..core.ssh_deploy import get_os_uptime, nodes_from_json
 
 
-HEADERS = ["ID", "State", "Seq", "Session", "Frames", "Last seen", "Peers (diag)"]
+HEADERS = [
+    "ID", "State", "Seq", "Session", "Frames", "Last seen",
+    "Process uptime", "OS uptime", "Peers (diag)",
+]
 LOST_AFTER_S = 10.0
+
+
+def _fmt_duration(seconds: float) -> str:
+    if seconds < 0:
+        return "—"
+    seconds = int(seconds)
+    d, rem = divmod(seconds, 86400)
+    h, rem = divmod(rem, 3600)
+    m, s = divmod(rem, 60)
+    if d:
+        return f"{d}d {h}h {m}m"
+    if h:
+        return f"{h}h {m}m"
+    return f"{m}m {s}s"
 
 # Colours (kept in sync with ui.style)
 DEFAULT_TEXT = QColor("#DBDEE1")
@@ -53,11 +71,16 @@ STATE_COLORS: dict[str, QColor] = {
 
 class StatusTab(QWidget):
     _poll_done = Signal()
+    _uptime_done = Signal()
 
-    def __init__(self, registry: NodeRegistry, diag_client_provider, parent=None) -> None:
+    def __init__(self, registry: NodeRegistry, diag_client_provider, settings_provider, parent=None) -> None:
         super().__init__(parent)
         self.registry = registry
         self._get_diag = diag_client_provider
+        self._get_settings = settings_provider
+        # node_id -> (os_uptime_seconds_at_fetch, local_monotonic_fetch_time)
+        self._os_uptime: dict[int, tuple[float, float]] = {}
+        self._os_uptime_lock = threading.Lock()
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 20, 20, 20)
@@ -72,10 +95,18 @@ class StatusTab(QWidget):
         self.poll_btn = QPushButton("Poll all")
         self.poll_btn.setProperty("accent", True)
         self.poll_btn.clicked.connect(self._on_poll_all)
+        self.uptime_btn = QPushButton("Refresh OS uptime")
+        self.uptime_btn.setToolTip(
+            "SSHes into every discovered node that matches a configured, "
+            "enabled hardware node and reads /proc/uptime. Simulated-mode "
+            "or unconfigured nodes show \"—\" since there's nothing to SSH "
+            "into."
+        )
+        self.uptime_btn.clicked.connect(self._on_refresh_os_uptime)
         self.clear_btn = QPushButton("Clear registry")
         self.clear_btn.setProperty("danger", True)
         self.clear_btn.clicked.connect(self._on_clear)
-        head.addWidget(self.poll_btn); head.addWidget(self.clear_btn)
+        head.addWidget(self.poll_btn); head.addWidget(self.uptime_btn); head.addWidget(self.clear_btn)
         outer.addLayout(head)
 
         split = QSplitter(Qt.Vertical)
@@ -121,6 +152,7 @@ class StatusTab(QWidget):
         self._timer.start()
 
         self._poll_done.connect(self._on_poll_done)
+        self._uptime_done.connect(self._on_uptime_done)
 
     def _on_clear(self) -> None:
         self.registry.clear()
@@ -154,6 +186,39 @@ class StatusTab(QWidget):
     def _on_poll_done(self) -> None:
         self.poll_btn.setEnabled(True)
         self.poll_btn.setText("Poll all")
+
+    def _on_refresh_os_uptime(self) -> None:
+        s = self._get_settings()
+        hw_by_id = {n.node_id: n for n in nodes_from_json(s.hardware_nodes_json) if n.enabled}
+        ids = self.registry.ids()
+        targets = [(nid, hw_by_id[nid]) for nid in ids if nid in hw_by_id]
+        if not targets:
+            self.detail.setPlainText(
+                "No discovered node matches a configured + enabled hardware "
+                "node (Package tab → \"Configure hardware nodes…\") -- "
+                "nothing to query over SSH. Simulated-mode nodes have no "
+                "OS to ask."
+            )
+            return
+        self.uptime_btn.setEnabled(False)
+        self.uptime_btn.setText("Querying…")
+
+        def worker() -> None:
+            try:
+                for nid, hn in targets:
+                    secs = get_os_uptime(hn)
+                    if secs is not None:
+                        with self._os_uptime_lock:
+                            self._os_uptime[nid] = (secs, time.monotonic())
+            finally:
+                self._uptime_done.emit()
+
+        threading.Thread(target=worker, name="status-os-uptime", daemon=True).start()
+
+    @Slot()
+    def _on_uptime_done(self) -> None:
+        self.uptime_btn.setEnabled(True)
+        self.uptime_btn.setText("Refresh OS uptime")
 
     def _on_selection(self) -> None:
         row = self.table.currentRow()
@@ -194,6 +259,21 @@ class StatusTab(QWidget):
                 peers = " · ".join(
                     f"{p['id']}:{p.get('health','?')}" for p in v.diag_status["peers"]
                 )
+
+            proc_uptime = (
+                "—" if v.session_started_at == 0.0
+                else _fmt_duration(now - v.session_started_at)
+            )
+
+            with self._os_uptime_lock:
+                os_entry = self._os_uptime.get(v.node_id)
+            if os_entry is None:
+                os_uptime = "—"
+            else:
+                base_secs, fetched_at = os_entry
+                live_estimate = base_secs + (now - fetched_at)
+                os_uptime = f"{_fmt_duration(live_estimate)} (synced {int(now - fetched_at)}s ago)"
+
             cells = [
                 str(v.node_id),
                 state_display,
@@ -201,6 +281,8 @@ class StatusTab(QWidget):
                 str(v.last_session),
                 str(v.frame_count),
                 f"{now - v.last_seen:.1f} s",
+                proc_uptime,
+                os_uptime,
                 peers,
             ]
 

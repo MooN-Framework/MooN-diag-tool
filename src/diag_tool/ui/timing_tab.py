@@ -333,8 +333,17 @@ class TimingTab(QWidget):
         self._append_build_line(f"=== deploy: {len(nodes)} enabled node(s) ===")
 
         def worker() -> None:
-            bin_path = self._build_and_push_binary(nodes, s, self._deploy_line.emit)
-            self._deploy_done.emit(bin_path is not None)
+            try:
+                bin_path = self._build_and_push_binary(nodes, s, self._deploy_line.emit)
+                self._deploy_done.emit(bin_path is not None)
+            except Exception as e:
+                # Safety net: an unhandled exception (anything other
+                # than SshError, which _build_and_push_binary already
+                # catches per-node) used to kill this thread silently --
+                # _deploy_done never fired, deploy_btn stayed stuck on
+                # "Deploying…" forever with no visible error.
+                self._deploy_line.emit(f"[deploy] unexpected {type(e).__name__}: {e}")
+                self._deploy_done.emit(False)
 
         threading.Thread(target=worker, name="deploy", daemon=True).start()
 
@@ -457,63 +466,71 @@ class TimingTab(QWidget):
         )
 
         def predeploy_and_build_params() -> None:
-            if mode == "simulated":
-                helper = CrossBuild(
-                    repo_path=Path(s.rust_repo_path),
-                    target_triple="",  # host build for simulated
-                    binary_name=s.binary_name or "node",
-                )
-                bin_path = helper.expected_binary_path()
-                if not bin_path.exists():
-                    self._sweep_line.emit(
-                        f"[build] host binary missing at {bin_path} -- building..."
+            try:
+                if mode == "simulated":
+                    helper = CrossBuild(
+                        repo_path=Path(s.rust_repo_path),
+                        target_triple="",  # host build for simulated
+                        binary_name=s.binary_name or "node",
                     )
-                    rc, built = self._blocking_build(helper)
-                    if rc != 0 or built is None:
-                        self._sweep_line.emit("[build] aborted: build failed")
+                    bin_path = helper.expected_binary_path()
+                    if not bin_path.exists():
+                        self._sweep_line.emit(
+                            f"[build] host binary missing at {bin_path} -- building..."
+                        )
+                        rc, built = self._blocking_build(helper)
+                        if rc != 0 or built is None:
+                            self._sweep_line.emit("[build] aborted: build failed")
+                            self._predeploy_failed.emit()
+                            return
+                        bin_path = built
+                    work_dir = Path(s.session_log_dir) / "timing_sweep"
+                    work_dir.mkdir(parents=True, exist_ok=True)
+                    params = SweepParams(
+                        candidates_ms=cands,
+                        nominal=self.nominal.value(),
+                        minimum=self.minimum.value(),
+                        measure_s=self.measure_s.value(),
+                        setup_timeout_s=self.setup_timeout_s.value(),
+                        max_overrun_fraction=self.max_overrun_frac.value(),
+                        overrun_tolerance_pct=self.overrun_tolerance_pct.value(),
+                        diag_group=s.diag_group, diag_port=s.diag_port,
+                        op_group=s.op_group, op_port=s.op_port,
+                        interface_ip=s.interface_ip,
+                        local_binary=bin_path,
+                        local_work_dir=work_dir,
+                    )
+                else:
+                    bin_path = self._build_and_push_binary(hw_nodes, s, self._sweep_line.emit)
+                    if bin_path is None:
                         self._predeploy_failed.emit()
                         return
-                    bin_path = built
-                work_dir = Path(s.session_log_dir) / "timing_sweep"
-                work_dir.mkdir(parents=True, exist_ok=True)
-                params = SweepParams(
-                    candidates_ms=cands,
-                    nominal=self.nominal.value(),
-                    minimum=self.minimum.value(),
-                    measure_s=self.measure_s.value(),
-                    setup_timeout_s=self.setup_timeout_s.value(),
-                    max_overrun_fraction=self.max_overrun_frac.value(),
-                    overrun_tolerance_pct=self.overrun_tolerance_pct.value(),
-                    diag_group=s.diag_group, diag_port=s.diag_port,
-                    op_group=s.op_group, op_port=s.op_port,
-                    interface_ip=s.interface_ip,
-                    local_binary=bin_path,
-                    local_work_dir=work_dir,
-                )
-            else:
-                bin_path = self._build_and_push_binary(hw_nodes, s, self._sweep_line.emit)
-                if bin_path is None:
-                    self._predeploy_failed.emit()
-                    return
-                params = SweepParams(
-                    candidates_ms=cands,
-                    # Derived from the enabled hardware nodes, not the
-                    # spinbox -- a manually-set nominal that drifts out
-                    # of sync with which nodes are actually enabled was
-                    # exactly the "always blasts out 2oo3 configs" bug.
-                    nominal=len(hw_nodes),
-                    minimum=self.minimum.value(),
-                    measure_s=self.measure_s.value(),
-                    setup_timeout_s=self.setup_timeout_s.value(),
-                    max_overrun_fraction=self.max_overrun_frac.value(),
-                    overrun_tolerance_pct=self.overrun_tolerance_pct.value(),
-                    diag_group=s.diag_group, diag_port=s.diag_port,
-                    op_group=s.op_group, op_port=s.op_port,
-                    interface_ip=s.interface_ip,
-                    hardware_nodes=hw_nodes,
-                    node_interface=s.node_network_interface,
-                )
-            self._sweep_ready.emit(mode, params)
+                    params = SweepParams(
+                        candidates_ms=cands,
+                        # Derived from the enabled hardware nodes, not the
+                        # spinbox -- a manually-set nominal that drifts out
+                        # of sync with which nodes are actually enabled was
+                        # exactly the "always blasts out 2oo3 configs" bug.
+                        nominal=len(hw_nodes),
+                        minimum=self.minimum.value(),
+                        measure_s=self.measure_s.value(),
+                        setup_timeout_s=self.setup_timeout_s.value(),
+                        max_overrun_fraction=self.max_overrun_frac.value(),
+                        overrun_tolerance_pct=self.overrun_tolerance_pct.value(),
+                        diag_group=s.diag_group, diag_port=s.diag_port,
+                        op_group=s.op_group, op_port=s.op_port,
+                        interface_ip=s.interface_ip,
+                        hardware_nodes=hw_nodes,
+                        node_interface=s.node_network_interface,
+                    )
+                self._sweep_ready.emit(mode, params)
+            except Exception as e:
+                # Safety net -- see the equivalent fix in _on_deploy's
+                # worker: without this, any unexpected error here left
+                # the Start button stuck disabled forever, with neither
+                # _sweep_ready nor _predeploy_failed ever firing.
+                self._sweep_line.emit(f"[build] unexpected {type(e).__name__}: {e}")
+                self._predeploy_failed.emit()
 
         threading.Thread(
             target=predeploy_and_build_params, name="sweep-predeploy", daemon=True,

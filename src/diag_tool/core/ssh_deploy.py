@@ -34,6 +34,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
@@ -382,6 +383,30 @@ def tail_remote_logs(node: HardwareNode, lines: int = 20, timeout: float = 15.0)
     )
 
 
+def ensure_remote_dirs(node: HardwareNode, timeout: float = 15.0) -> None:
+    """mkdir -p the parent directories of remote_binary/remote_config/
+    remote_log/remote_log_dir before scp'ing into them.
+
+    scp (the legacy protocol this module shells out to) can NOT create
+    missing destination directories -- it just fails with a generic
+    "dest open ... Failure" if the parent doesn't exist. This matters
+    especially when remote_binary/remote_config point somewhere on a
+    tmpfs mount (e.g. /opt/moon, writable but starting empty on every
+    boot) rather than a path that's guaranteed to already exist: the
+    subdirectory (e.g. /opt/moon/bin) is normally only created by
+    moon-pkg-load.service when it extracts a package, so on a boot
+    where that hasn't happened (or won't, because the harness is
+    deliberately bypassing the package flow) it simply isn't there yet.
+    """
+    dirs = {
+        shlex.quote(str(Path(node.remote_binary).parent)),
+        shlex.quote(str(Path(node.remote_config).parent)),
+        shlex.quote(str(Path(node.remote_log).parent)),
+        shlex.quote(node.remote_log_dir),
+    }
+    ssh_exec(node, "mkdir -p " + " ".join(sorted(dirs)), timeout=timeout)
+
+
 def check_reachable(node: HardwareNode) -> tuple[bool, str]:
     """Quick liveness check: `ssh host echo ok`. Returns (ok, message)."""
     try:
@@ -389,6 +414,65 @@ def check_reachable(node: HardwareNode) -> tuple[bool, str]:
         return (out.strip() == "ok", out.strip() or "ok")
     except SshError as e:
         return (False, e.output or str(e))
+
+
+def stop_moon_node_service(node: HardwareNode, timeout: float = 30.0) -> None:
+    """Best-effort: stop the production `moon-node.service` systemd unit
+    (see ui/package_tab.py's Deploy flow / core/moon_package.py) before
+    the test harness starts its own directly-exec'd binary on the same
+    node via HardwareNode.start_cmd/stop_cmd.
+
+    These are two independent things that can end up running the SAME
+    node role on the same hardware at once: moon-node.service runs the
+    production binary from /opt/moon/bin/node, while the harness runs
+    whatever's at HardwareNode.remote_binary (default /opt/voting/node)
+    via plain nohup+exec. resolved_stop_cmd()'s `pkill -f {bin}` only
+    matches the harness's own binary path -- it does NOT touch
+    moon-node.service, so on a node that was ever deployed to via the
+    Package tab, the production binary keeps running in parallel with
+    the harness's test binary, both fighting over the same multicast
+    group/port. Call this once per node right before the harness's own
+    push+start sequence.
+
+    `|| true`: a node that was never given the production package
+    doesn't have this unit installed at all -- systemctl then reports
+    "not found", which is fine, there's nothing to stop.
+    """
+    try:
+        ssh_exec(node, "sudo systemctl stop moon-node.service || true", timeout=timeout)
+    except SshError:
+        pass  # best-effort -- if the node's unreachable, the push/start right after will surface that
+
+
+def get_os_uptime(node: HardwareNode, timeout: float = 15.0) -> Optional[float]:
+    """Seconds since the node's OS booted, read from `/proc/uptime`
+    (its first field). Returns None on any SSH failure or unparsable
+    output -- caller decides how to display that (e.g. "n/a")."""
+    try:
+        out = ssh_exec(node, "cat /proc/uptime", timeout=timeout)
+    except SshError:
+        return None
+    try:
+        return float(out.strip().split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def wait_for_reachable(node: HardwareNode, timeout: float = 90.0, interval: float = 3.0) -> bool:
+    """Poll check_reachable() until it succeeds or timeout runs out.
+
+    Used after `sudo reboot`: SSH refuses connections for a while during
+    boot (network not up yet, sshd not started yet), so a single
+    check_reachable() called right after issuing the reboot would almost
+    always report unreachable even on a node that comes back up fine.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ok, _ = check_reachable(node)
+        if ok:
+            return True
+        time.sleep(interval)
+    return False
 
 
 # ---- Serialisation for AppSettings -----------------------------------

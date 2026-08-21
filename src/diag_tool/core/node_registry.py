@@ -30,6 +30,14 @@ class NodeView:
     frame_count: int = 0
     diag_status: Optional[dict] = None
     diag_status_ts: float = 0.0
+    # Local monotonic time when we first observed the node's CURRENT
+    # session_id -- reset whenever session_id changes (the node's
+    # process restarted). This is our own observation time, not the
+    # node's actual process-start wall clock (we have no way to know
+    # that from the wire alone) -- so "process uptime" derived from
+    # this is "how long since we last saw this node restart", which is
+    # what actually matters for diagnostics. 0.0 = never observed yet.
+    session_started_at: float = 0.0
 
 
 class NodeRegistry:
@@ -80,7 +88,11 @@ class NodeRegistry:
             v = self._nodes.get(node_id)
             if v is None:
                 v = NodeView(node_id=node_id, first_seen=now, last_seen=now)
+                v.session_started_at = now
                 self._nodes[node_id] = v
+            elif session_id != v.last_session:
+                # New session_id -- the node's process restarted.
+                v.session_started_at = now
             v.last_seen = now
             v.last_state = state_name
             v.last_state_wire = state_wire
@@ -112,7 +124,10 @@ class NodeRegistry:
             if "current_seq" in status:
                 v.last_seq = status["current_seq"]
             if "session_id" in status:
-                v.last_session = status["session_id"]
+                new_session = status["session_id"]
+                if v.session_started_at == 0.0 or new_session != v.last_session:
+                    v.session_started_at = now
+                v.last_session = new_session
             changed = NodeView(**{k: getattr(v, k) for k in v.__slots__})
             cbs = list(self._on_change_cbs)
         for cb in cbs:

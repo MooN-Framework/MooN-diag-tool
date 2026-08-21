@@ -51,7 +51,15 @@ from PySide6.QtWidgets import (
 
 from ..core.cross_compile import CrossBuild
 from ..core.moon_package import PackageBuildError, build_package, build_payload_dir
-from ..core.ssh_deploy import HardwareNode, SshError, nodes_from_json, scp_bytes, scp_file, ssh_exec
+from ..core.ssh_deploy import (
+    HardwareNode,
+    SshError,
+    nodes_from_json,
+    scp_bytes,
+    scp_file,
+    ssh_exec,
+    wait_for_reachable,
+)
 from .hardware_nodes_dialog import HardwareNodesDialog
 
 from harness.config_gen import make_spec, render_toml_str
@@ -103,6 +111,14 @@ class PackageTab(QWidget):
         self.nominal = QSpinBox(); self.nominal.setRange(2, 16); self.nominal.setValue(3)
         self.minimum = QSpinBox(); self.minimum.setRange(1, 16); self.minimum.setValue(2)
         self.cycle_ms = QSpinBox(); self.cycle_ms.setRange(1, 1000); self.cycle_ms.setValue(20)
+        self.init_sync_timeout = QSpinBox(); self.init_sync_timeout.setRange(1, 600_000)
+        self.init_sync_timeout.setValue(2000); self.init_sync_timeout.setSuffix(" ms")
+        self.init_sync_timeout.setToolTip(
+            "How long a node waits at startup for its peers before giving "
+            "up. Real hardware often needs this much higher than the 2000 ms "
+            "default -- nodes power up at different times and boot slower "
+            "than a local/simulated run."
+        )
         self.diag_group = QLineEdit(s.diag_group)
         self.diag_port = QSpinBox(); self.diag_port.setRange(1, 65535); self.diag_port.setValue(s.diag_port)
         self.op_group = QLineEdit(s.op_group)
@@ -128,6 +144,7 @@ class PackageTab(QWidget):
         bf.addRow("Node ID", self.node_id)
         bf.addRow("Nominal / Minimum", self._hbox(self.nominal, self.minimum))
         bf.addRow("Cycle duration (ms)", self.cycle_ms)
+        bf.addRow("Init sync timeout (ms)", self.init_sync_timeout)
         bf.addRow("Diag group / port", self._hbox(self.diag_group, self.diag_port))
         bf.addRow("Op group / port", self._hbox(self.op_group, self.op_port))
         bf.addRow("Node network interface", self.node_iface)
@@ -318,26 +335,27 @@ class PackageTab(QWidget):
             fabric_group=self.op_group.text().strip(), fabric_port=self.op_port.value(),
             diag_group=self.diag_group.text().strip(), diag_port=self.diag_port.value(),
             interface=self.node_iface.text().strip() or "eth0",
+            init_sync_timeout_ms=self.init_sync_timeout.value(),
         )
         pi_gen_repo = Path(s.moon_pi_gen_repo_path)
         signing_key = Path(s.moon_signing_key_path)
 
         def worker() -> None:
-            done = threading.Event()
-            result: dict = {"rc": -1, "path": None}
-
-            def on_done(rc: int, path: Optional[Path]) -> None:
-                result["rc"] = rc; result["path"] = path
-                done.set()
-
-            cross.start(on_line=self.line_received.emit, on_done=on_done)
-            done.wait()
-            if result["rc"] != 0 or result["path"] is None:
-                self._build_done.emit(False, "build failed, see log above")
-                return
-
-            bin_path = result["path"]
             try:
+                done = threading.Event()
+                result: dict = {"rc": -1, "path": None}
+
+                def on_done(rc: int, path: Optional[Path]) -> None:
+                    result["rc"] = rc; result["path"] = path
+                    done.set()
+
+                cross.start(on_line=self.line_received.emit, on_done=on_done)
+                done.wait()
+                if result["rc"] != 0 or result["path"] is None:
+                    self._build_done.emit(False, "build failed, see log above")
+                    return
+
+                bin_path = result["path"]
                 spec = make_spec(**spec_kwargs)
                 toml_text = render_toml_str(spec)
                 workdir = Path(tempfile.mkdtemp(prefix="diag-tool-pkg-"))
@@ -349,10 +367,15 @@ class PackageTab(QWidget):
                     payload_dir=payload_dir, out_path=out_path,
                     on_line=self.line_received.emit,
                 )
+                self._build_done.emit(True, str(out_path))
             except PackageBuildError as e:
                 self._build_done.emit(False, str(e))
-                return
-            self._build_done.emit(True, str(out_path))
+            except Exception as e:
+                # Safety net -- see _on_deploy's worker for the same
+                # fix and why: without this, any other exception here
+                # left build_btn stuck on "Building…" forever.
+                self.line_received.emit(f"[package] unexpected {type(e).__name__}: {e}")
+                self._build_done.emit(False, f"unexpected {type(e).__name__}: {e}")
 
         threading.Thread(target=worker, name="build-package", daemon=True).start()
 
@@ -446,18 +469,47 @@ class PackageTab(QWidget):
                     timeout=60.0,  # moon-pkg-load extracts + sha256-checks the payload off the SD card
                 )
                 time.sleep(1.0)
-                status = ssh_exec(
+
+                # moon-pkg-load.service is the on-target verifier (see
+                # core/moon_package.py): it checks manifest.sig + payload_sha256
+                # and extracts payload.tar.gz to /opt/moon. That's the actual
+                # "did THIS deploy succeed" signal -- independent of any other
+                # node. It's Type=oneshot without RemainAfterExit, so
+                # `is-active` goes back to "inactive" the moment it finishes
+                # either way; `Result` is what persists and reflects the exit
+                # code of the last run ("success" vs "exit-code"/"failed").
+                pkg_result = ssh_exec(
+                    node,
+                    "systemctl show -p Result --value moon-pkg-load.service",
+                    timeout=30.0,
+                ).strip()
+                if pkg_result == "success":
+                    self.line_received.emit(
+                        f"[deploy] {node.host} moon-pkg-load.service verified + extracted the new package"
+                    )
+                else:
+                    ok = False
+                    self.line_received.emit(
+                        f"[deploy] {node.host} moon-pkg-load.service did NOT succeed "
+                        f"(Result={pkg_result or 'unknown'}) -- "
+                        f"check 'journalctl -u moon-pkg-load' on the node"
+                    )
+
+                # moon-node.service is reported for visibility only -- it can
+                # legitimately stay non-active until enough peer nodes are up
+                # for quorum (nominal/minimum), so its state must not gate
+                # deploy success/failure.
+                node_status = ssh_exec(
                     node,
                     "systemctl is-active --quiet moon-node.service && echo ACTIVE || echo INACTIVE",
                     timeout=30.0,
                 )
-                if "ACTIVE" in status:
+                if "ACTIVE" in node_status:
                     self.line_received.emit(f"[deploy] {node.host} moon-node.service is active")
                 else:
-                    ok = False
                     self.line_received.emit(
-                        f"[deploy] {node.host} moon-node.service did NOT come up -- "
-                        f"check 'journalctl -u moon-pkg-load -u moon-node' on the node"
+                        f"[deploy] {node.host} moon-node.service not yet active "
+                        f"(expected until enough peer nodes are up for quorum)"
                     )
 
                 if set_ip:
@@ -475,13 +527,42 @@ class PackageTab(QWidget):
                         ssh_exec(node, "sudo reboot", timeout=15.0)
                     except SshError:
                         pass  # connection drops as the node goes down -- expected
-                    if set_ip:
-                        self.line_received.emit(
-                            f"[deploy] reconnect at {new_ip.split('/')[0]} once it's back up "
-                            f"(may take a minute)"
-                        )
+
+                    # The pkg_result check above ran against the pre-reboot
+                    # live-restart -- it says nothing about whether
+                    # moon-pkg-load.service (which also runs at boot, it's
+                    # enabled) actually succeeded on THIS reboot. Wait for
+                    # the node to come back and check that boot's result
+                    # for real, rather than reporting success/failure based
+                    # on a state that's about to be replaced by a fresh boot.
+                    reboot_host = new_ip.split("/")[0] if set_ip else node.host
+                    reboot_node = node if not set_ip else replace(node, host=reboot_host)
+                    self.line_received.emit(f"[deploy] waiting for {reboot_host} to come back up…")
+                    if wait_for_reachable(reboot_node):
+                        time.sleep(1.0)  # give moon-pkg-load.service a moment to finish its boot-time run
+                        boot_pkg_result = ssh_exec(
+                            reboot_node,
+                            "systemctl show -p Result --value moon-pkg-load.service",
+                            timeout=30.0,
+                        ).strip()
+                        if boot_pkg_result == "success":
+                            ok = True
+                            self.line_received.emit(
+                                f"[deploy] {reboot_host} back up -- moon-pkg-load.service "
+                                f"succeeded on this boot"
+                            )
+                        else:
+                            ok = False
+                            self.line_received.emit(
+                                f"[deploy] {reboot_host} back up but moon-pkg-load.service did "
+                                f"NOT succeed on this boot (Result={boot_pkg_result or 'unknown'}) "
+                                f"-- check 'journalctl -u moon-pkg-load' on the node"
+                            )
                     else:
-                        self.line_received.emit("[deploy] reconnect once it's back up (may take a minute)")
+                        ok = False
+                        self.line_received.emit(
+                            f"[deploy] {reboot_host} did not come back up within 90s -- check manually"
+                        )
                 elif set_ip:
                     self.line_received.emit(
                         "[deploy] new IP written but NOT applied live -- reboot the node "
@@ -491,6 +572,19 @@ class PackageTab(QWidget):
                 self._deploy_done.emit(ok)
             except SshError as e:
                 self.line_received.emit(f"[deploy] {node.host} FAILED: {e.output}")
+                self._deploy_done.emit(False)
+            except Exception as e:
+                # Safety net: ANY other exception here used to kill this
+                # background thread silently (Python threads just print
+                # a traceback to stderr and die) -- _deploy_done never
+                # fired, so deploy_btn stayed stuck on "Deploying…"
+                # forever with no visible error anywhere in the UI. This
+                # guarantees the button always gets re-enabled and the
+                # failure is at least visible in the log, no matter what
+                # actually went wrong.
+                self.line_received.emit(
+                    f"[deploy] {node.host} FAILED (unexpected {type(e).__name__}): {e}"
+                )
                 self._deploy_done.emit(False)
 
         threading.Thread(target=worker, name="deploy-package", daemon=True).start()
