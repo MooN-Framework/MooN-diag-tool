@@ -37,6 +37,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -130,6 +131,21 @@ def _make_sim_fabric(binary: Path, work_dir: Path, nominal: int, minimum: int) -
     f = Fabric(opts=opts)
     f.start_all()
     if not f.wait_operational(timeout=15.0):
+        # Show WHY -- without this, a hang (never reaching CycleSyncOk)
+        # and an immediate crash both look identical: a bare
+        # "RuntimeError: fabric did not reach operational state" with
+        # zero diagnostic content. Tail each local node's own captured
+        # stdout (crash/panic output, or nothing at all if it's stuck
+        # silently waiting on peer discovery -- which itself points at
+        # a multicast/network problem on loopback, not a Rust bug).
+        print(f"[sim-fabric] FAILED to reach operational -- tailing {len(f.nodes)} node log(s):", flush=True)
+        for nid, node in sorted(f.nodes.items()):
+            print(f"--- node {nid} (pid alive={node.is_running()}) ---", flush=True)
+            tail = node.log_lines[-15:]
+            if not tail:
+                print("  (no output captured at all)", flush=True)
+            for ln in tail:
+                print(f"  {ln}", flush=True)
         f.stop_all()
         raise RuntimeError("fabric did not reach operational state")
     return f
@@ -156,13 +172,13 @@ class _HardwareFabric:
 
     def stop_all(self):
         # Only tears down the local SSH tail helpers + diag socket --
-        # deliberately does NOT stop_cmd the remote node processes.
-        # Hardware nodes are an external, already-running resource
-        # shared across every test in this pytest session (started
-        # once by the diag tool's "Deploy binary + config before run"
-        # step, not per-fixture like simulated nodes), so a function-
-        # scoped fabric_N fixture tearing them down after one test
-        # would break the next one.
+        # deliberately does NOT stop_cmd the remote node processes at
+        # TEARDOWN. Hardware nodes are pushed/deployed once per pytest
+        # session (the diag tool's "Deploy binary + config before run"
+        # step), so leaving the binaries running here is fine -- the
+        # NEXT test's fixture setup calls restart_all() anyway, which
+        # gives it a fresh boot regardless of what state this test left
+        # behind. Stopping here too would just be redundant work.
         try:
             self.diag.close()
         except Exception:
@@ -187,13 +203,71 @@ class _HardwareFabric:
         from diag_tool.core.ssh_deploy import SshError, ssh_exec  # local import, see below
 
         rn = self.nodes[node_id]
+        print(f"[restart] node {node_id} ({rn.hw.host}): stopping", flush=True)
         try:
             ssh_exec(rn.hw, rn.hw.resolved_stop_cmd(), timeout=15.0)
         except SshError:
             pass  # best-effort, matches simulated Fabric.restart_node's "kill if still alive"
         time.sleep(0.3)  # let the old process actually exit before rebinding its sockets
+        print(f"[restart] node {node_id} ({rn.hw.host}): starting", flush=True)
         ssh_exec(rn.hw, rn.hw.resolved_start_cmd(), timeout=15.0)
         _ = wait_operational  # reserviert, wie im simulierten Fabric
+
+    def wait_operational(self, timeout: float = 15.0, after: Optional[dict[int, int]] = None) -> bool:
+        """Same detection pattern as the simulated Fabric.wait_operational:
+        each node's current-session log (tailed live over SSH -- see
+        RemoteNode.start_tailing/wait_for_log) prints this line once
+        discovery + sync finished and the first cycle is running.
+
+        `after`: optional {node_id: line_count} watermark (see
+        RemoteNode.line_count), one per node, restricting the match to
+        lines produced since that point. Without it, a pattern that
+        already matched once earlier in this pytest session (e.g. the
+        very first successful boot) matches that same stale buffered
+        line again instantly -- see restart_all()'s docstring for why
+        that's a real bug, not a theoretical one.
+        """
+        pat = r"transition from=CycleSync event=CycleSyncOk to=ReadInputs"
+        for node_id, node in self.nodes.items():
+            watermark = after.get(node_id, 0) if after else 0
+            print(f"[wait] node {node_id}: waiting for operational (timeout={timeout:.0f}s)...", flush=True)
+            if not node.wait_for_log(pat, timeout=timeout, after=watermark):
+                print(f"[wait] node {node_id}: TIMEOUT -- did not reach operational", flush=True)
+                return False
+            print(f"[wait] node {node_id}: operational", flush=True)
+        return True
+
+    def restart_all(self, wait_operational: float = 15.0) -> bool:
+        """Stop + start EVERY managed node fresh, then wait for all of
+        them to reach the first operational cycle.
+
+        Hardware nodes are only pushed/deployed ONCE per pytest session
+        (the diag tool's "Deploy binary + config before run" step, see
+        stop_all()'s docstring) -- without restarting the
+        already-running binaries between tests, state left over from
+        one scenario (isolated peers, altered session_id/sequence
+        counters, injected faults) carries straight into the next one
+        and breaks it. Call this once per test, from the fabric_N
+        fixture's setup, mirroring the simulated Fabric's fresh
+        start_all() + wait_operational() every test gets for free.
+
+        Captures each node's line_count() watermark BEFORE restarting
+        it and passes it through to wait_operational(after=...) --
+        without this, the readiness check matches the FIRST test's
+        "CycleSyncOk" line (still sitting in the tail buffer) on every
+        subsequent restart and reports success immediately, without the
+        new session having actually come up yet. That made every test
+        after the first one run against a system that wasn't really
+        ready, even though restart_all() itself ran correctly.
+        """
+        watermarks: dict[int, int] = {}
+        print(f"[restart] pre-test: restarting all {len(self.nodes)} node(s) fresh", flush=True)
+        for node_id, node in self.nodes.items():
+            watermarks[node_id] = node.line_count
+            self.restart_node(node_id)
+        ok = self.wait_operational(timeout=wait_operational, after=watermarks)
+        print(f"[restart] pre-test restart {'OK' if ok else 'FAILED'}", flush=True)
+        return ok
 
 
 def _make_hardware_fabric(request, expected_nodes: int):
@@ -233,9 +307,42 @@ def _make_hardware_fabric(request, expected_nodes: int):
         interface_ip=request.config.getoption("--interface-ip"),
     )
 
-    # Confirm every configured node actually answers on the diag
-    # channel before handing the fabric to the test -- scoped to the
-    # exact configured ids now (no more blind candidate-range scan).
+    nodes: dict[int, RemoteNode] = {}
+    for hn in chosen:
+        rn = RemoteNode(node_id=hn.node_id, hw=hn)
+        rn.start_tailing()
+        nodes[hn.node_id] = rn
+    fabric = _HardwareFabric(diag, nodes)
+
+    # Fresh boot before every test -- see _HardwareFabric.restart_all()'s
+    # docstring: without this, state left over from one scenario
+    # (isolated peers, altered session_id/sequence counters, injected
+    # faults) carries into the next scenario and breaks it, since the
+    # nodes are otherwise only deployed once for the whole pytest run.
+    #
+    # This MUST happen before the diag-reachability check below, not
+    # after: restart_all() works purely over SSH (stop_cmd/start_cmd),
+    # so it doesn't care whether the node is currently alive, dead,
+    # isolated, or in Failsafe. The diag-reachability check, in
+    # contrast, requires the node to already be up and answering --
+    # if a PREVIOUS scenario's fault injection killed a node's process
+    # outright (rather than leaving it running-but-faulted), checking
+    # reachability before restarting made every test after that one
+    # fail immediately at discovery, restart_all() never even reached.
+    restart_timeout = request.config.getoption("--discovery-timeout")
+    if not fabric.restart_all(wait_operational=restart_timeout):
+        fabric.stop_all()
+        raise RuntimeError(
+            f"hardware fabric: nodes did not reach operational within "
+            f"{restart_timeout}s after the pre-test restart"
+        )
+
+    # NOW confirm every node also answers on the diag (UDP) channel --
+    # the SSH-tailed log line restart_all() waited for proves the
+    # framework's own CycleSync loop started, but scenario tests talk
+    # to the nodes over this separate diag channel (fabric.diag.*), so
+    # this is a genuinely distinct thing worth checking, just no longer
+    # a precondition for restarting.
     deadline = time.monotonic() + request.config.getoption("--discovery-timeout")
     ready: set[int] = set()
     while time.monotonic() < deadline and len(ready) < len(chosen):
@@ -245,22 +352,14 @@ def _make_hardware_fabric(request, expected_nodes: int):
             if diag.get_status(hn.node_id, timeout=0.3) is not None:
                 ready.add(hn.node_id)
     if len(ready) < len(chosen):
-        try:
-            diag.close()
-        except Exception:
-            pass
+        fabric.stop_all()
         raise RuntimeError(
             f"discovery: only {len(ready)}/{len(chosen)} configured hardware "
-            f"nodes reachable via diag (missing: "
+            f"nodes reachable via diag after restart (missing: "
             f"{sorted(hn.node_id for hn in chosen if hn.node_id not in ready)})"
         )
 
-    nodes: dict[int, RemoteNode] = {}
-    for hn in chosen:
-        rn = RemoteNode(node_id=hn.node_id, hw=hn)
-        rn.start_tailing()
-        nodes[hn.node_id] = rn
-    return _HardwareFabric(diag, nodes)
+    return fabric
 
 
 # ---- fabric_N fixtures ----------------------------------------------

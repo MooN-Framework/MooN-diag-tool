@@ -51,16 +51,24 @@ class ScenarioMeta:
     required_nodes: int            # 3 or 4, from the fabric_3/fabric_4 fixture used
     hw_status: str                 # "ok" | "unsupported"
     hw_notes: tuple[str, ...]      # human-readable notes, empty if none apply
+    has_tests: bool = True         # False: file defines zero `def test_*` functions (e.g.
+                                    # unconditionally pytest.mark.skip'd at module level with
+                                    # nothing left to skip) -- running it collects 0 items and
+                                    # pytest exits 5 ("no tests ran"), not a real pass/fail.
 
     @property
     def unsupported(self) -> bool:
         return self.hw_status == "unsupported"
 
 
+_TEST_FUNC_RE = re.compile(r"^\s*(?:async\s+)?def\s+test_\w+", re.MULTILINE)
+
+
 def analyze_scenario(path: Path) -> ScenarioMeta:
     text = path.read_text(errors="ignore")
 
     required_nodes = 4 if re.search(r"\bfabric_4\b", text) else 3
+    has_tests = bool(_TEST_FUNC_RE.search(text))
 
     notes: list[str] = []
 
@@ -69,10 +77,16 @@ def analyze_scenario(path: Path) -> ScenarioMeta:
             "restart_node() -- startet den echten Node-Prozess auf der "
             "Hardware per SSH neu (stop_cmd/start_cmd)"
         )
+    if not has_tests:
+        notes.append(
+            "keine Testfunktion in dieser Datei (nur ein Modul-weiter "
+            "pytest.mark.skip o.ae.) -- Ausfuehrung wuerde 0 Items "
+            "sammeln, pytest exit=5, kein echtes Pass/Fail"
+        )
 
     return ScenarioMeta(
         path=path, required_nodes=required_nodes,
-        hw_status="ok", hw_notes=tuple(notes),
+        hw_status="ok", hw_notes=tuple(notes), has_tests=has_tests,
     )
 
 
@@ -88,6 +102,8 @@ def infeasible_reason(meta: ScenarioMeta, configured_node_count: int) -> str:
     """Human-readable reason a scenario can't run against the currently
     configured hardware nodes -- empty string if it can."""
     reasons: list[str] = []
+    if not meta.has_tests:
+        reasons.append("keine Testfunktion in dieser Datei")
     if meta.required_nodes > configured_node_count:
         reasons.append(
             f"braucht {meta.required_nodes} Knoten, "

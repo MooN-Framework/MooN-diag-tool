@@ -4,9 +4,13 @@ Timing tab.
 Three vertical sections:
   1. Cross-compile & deploy panel (Rust target triple, cargo build,
      deploy binary via SCP to all hardware nodes).
-  2. Sweep parameters (candidates, nominal/minimum, measure_s,
-     overrun tolerance).
+  2. Sweep parameters (candidates, nominal/minimum, stability wait).
   3. Live results table with colour-coded verdicts.
+
+Finds the smallest candidate cycle_ms the full system still stays
+healthy at: bring the candidate up, wait `stability_wait_s` doing
+nothing, then ask every node once more whether it's still in a normal
+operating state. That's the whole stability criterion.
 
 Modes:
   simulated — spawn local Rust processes with generated TOML configs.
@@ -18,6 +22,7 @@ signals.
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -43,29 +48,38 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.cross_compile import CrossBuild
-from ..core.ssh_deploy import HardwareNode, SshError, enabled_nodes, nodes_from_json, nodes_to_json, scp_file
+from ..core.ssh_deploy import (
+    HardwareNode,
+    SshError,
+    enabled_nodes,
+    ensure_remote_dirs,
+    nodes_from_json,
+    nodes_to_json,
+    scp_file,
+    ssh_exec,
+    stop_moon_node_service,
+)
 from ..core.timing_sweep import (
     CandidateResult,
     SweepParams,
     TimingSweep,
     VERDICT_NO_OP,
     VERDICT_NODE_DIED,
-    VERDICT_OVERRUNS,
+    VERDICT_NOT_STABLE,
     VERDICT_STABLE,
     VERDICT_EXCEPTION,
 )
 from .hardware_nodes_dialog import HardwareNodesDialog
 
 
-HEADERS = ["cycle_ms", "operational", "cycles", "mean_us",
-           "overrun_frac", "worst_overrun_us", "verdict", "detail"]
+HEADERS = ["cycle_ms", "operational", "still healthy after wait", "verdict", "detail"]
 
 VERDICT_COLORS = {
-    VERDICT_STABLE:    QColor("#23A55A"),
-    VERDICT_OVERRUNS:  QColor("#F0B232"),
-    VERDICT_NO_OP:     QColor("#DA373C"),
-    VERDICT_NODE_DIED: QColor("#DA373C"),
-    VERDICT_EXCEPTION: QColor("#DA373C"),
+    VERDICT_STABLE:     QColor("#23A55A"),
+    VERDICT_NOT_STABLE: QColor("#F0B232"),
+    VERDICT_NO_OP:      QColor("#DA373C"),
+    VERDICT_NODE_DIED:  QColor("#DA373C"),
+    VERDICT_EXCEPTION:  QColor("#DA373C"),
 }
 
 
@@ -161,26 +175,27 @@ class TimingTab(QWidget):
         # Sweep params
         pbox = QGroupBox("Sweep parameters")
         pf = QFormLayout(pbox); pf.setContentsMargins(12, 18, 12, 12); pf.setSpacing(8)
-        self.candidates = QLineEdit("20,15,12,10,8,6,5,4,3,2")
+        self.candidates = QLineEdit("20,15,12,10,8,6")
         self.candidates.setPlaceholderText("descending list of cycle_ms, comma-separated")
         self.nominal = QSpinBox(); self.nominal.setRange(2, 16); self.nominal.setValue(3)
         self.minimum = QSpinBox(); self.minimum.setRange(1, 16); self.minimum.setValue(2)
-        self.measure_s = QDoubleSpinBox(); self.measure_s.setRange(1.0, 300.0); self.measure_s.setValue(8.0); self.measure_s.setSuffix(" s")
+        self.stability_wait_s = QDoubleSpinBox()
+        self.stability_wait_s.setRange(1.0, 300.0)
+        self.stability_wait_s.setValue(8.0)
+        self.stability_wait_s.setSuffix(" s")
+        self.stability_wait_s.setToolTip(
+            "After the candidate comes up, wait this long doing nothing, "
+            "then check once more that every node is still in a normal "
+            "operating state (not Startup/InitSync/Isolation/Failsafe/"
+            "ErrorManagement). That's the whole stability check -- is the "
+            "full system still up after waiting."
+        )
         self.setup_timeout_s = QDoubleSpinBox(); self.setup_timeout_s.setRange(1.0, 120.0); self.setup_timeout_s.setValue(15.0); self.setup_timeout_s.setSuffix(" s")
-        self.max_overrun_frac = QDoubleSpinBox(); self.max_overrun_frac.setRange(0.0, 1.0); self.max_overrun_frac.setSingleStep(0.005); self.max_overrun_frac.setDecimals(3); self.max_overrun_frac.setValue(0.02)
-        self.overrun_tolerance_pct = QDoubleSpinBox()
-        self.overrun_tolerance_pct.setRange(0.1, 100.0)
-        self.overrun_tolerance_pct.setSingleStep(0.5)
-        self.overrun_tolerance_pct.setDecimals(1)
-        self.overrun_tolerance_pct.setValue(5.0)
-        self.overrun_tolerance_pct.setSuffix(" %")
         pf.addRow("cycle_ms candidates", self.candidates)
         pf.addRow("nominal", self.nominal)
         pf.addRow("minimum", self.minimum)
-        pf.addRow("measure duration", self.measure_s)
+        pf.addRow("stability wait", self.stability_wait_s)
         pf.addRow("operational timeout", self.setup_timeout_s)
-        pf.addRow("max overrun fraction", self.max_overrun_frac)
-        pf.addRow("overrun tolerance", self.overrun_tolerance_pct)
         cd_row.addWidget(pbox, 2)
 
         tl.addLayout(cd_row)
@@ -235,9 +250,13 @@ class TimingTab(QWidget):
     # ---- mode toggle ------------------------------------------------------
 
     def _current_mode(self) -> str:
-        """Mode is derived, not chosen: hardware iff at least one hardware
-        node is both configured and enabled, simulated otherwise."""
+        """s.test_mode "auto" (default): derived from whether at least
+        one hardware node is both configured and enabled. "simulated"/
+        "hardware": forced regardless of what's configured -- see
+        Settings tab."""
         s = self._get_settings()
+        if s.test_mode in ("simulated", "hardware"):
+            return s.test_mode
         return "hardware" if enabled_nodes(nodes_from_json(s.hardware_nodes_json)) else "simulated"
 
     def _sync_mode_ui(self) -> None:
@@ -388,6 +407,29 @@ class TimingTab(QWidget):
         ok_all = True
         for hn in nodes:
             try:
+                # Preparation phase, same reasoning as TimingSweep._hw_start /
+                # TestTab._deploy_to_hardware: stop the production
+                # moon-node.service (best-effort -- it may not exist on a
+                # node that was never given a package), AND kill any
+                # already-running instance of the harness's OWN
+                # nohup-started process (resolved_stop_cmd()) -- without
+                # this second one, a node this tool already deployed to
+                # and started earlier keeps that binary running, and scp
+                # trying to overwrite a currently-executing file fails
+                # with ETXTBSY ("text file busy", shows up as a generic
+                # "dest open ... Failure"). Then make sure the destination
+                # directory actually exists -- scp can't create missing
+                # parent dirs, and /opt/moon/bin only exists after
+                # moon-pkg-load.service has extracted a package into that
+                # boot's tmpfs.
+                emit_line(f"[deploy] {hn.host} stopping moon-node.service (if present)")
+                stop_moon_node_service(hn)
+                try:
+                    ssh_exec(hn, hn.resolved_stop_cmd(), timeout=30.0)
+                except SshError as e:
+                    emit_line(f"[deploy] {hn.host} stop_cmd failed (continuing): {e.output}")
+                time.sleep(0.3)  # let the old process actually exit before we overwrite its binary
+                ensure_remote_dirs(hn)
                 emit_line(f"[deploy] {hn.host} → {hn.remote_binary}")
                 scp_file(hn, bin_path, hn.remote_binary, timeout=120.0)
                 emit_line(f"[deploy] {hn.host} ok")
@@ -490,10 +532,8 @@ class TimingTab(QWidget):
                         candidates_ms=cands,
                         nominal=self.nominal.value(),
                         minimum=self.minimum.value(),
-                        measure_s=self.measure_s.value(),
+                        stability_wait_s=self.stability_wait_s.value(),
                         setup_timeout_s=self.setup_timeout_s.value(),
-                        max_overrun_fraction=self.max_overrun_frac.value(),
-                        overrun_tolerance_pct=self.overrun_tolerance_pct.value(),
                         diag_group=s.diag_group, diag_port=s.diag_port,
                         op_group=s.op_group, op_port=s.op_port,
                         interface_ip=s.interface_ip,
@@ -513,10 +553,8 @@ class TimingTab(QWidget):
                         # exactly the "always blasts out 2oo3 configs" bug.
                         nominal=len(hw_nodes),
                         minimum=self.minimum.value(),
-                        measure_s=self.measure_s.value(),
+                        stability_wait_s=self.stability_wait_s.value(),
                         setup_timeout_s=self.setup_timeout_s.value(),
-                        max_overrun_fraction=self.max_overrun_frac.value(),
-                        overrun_tolerance_pct=self.overrun_tolerance_pct.value(),
                         diag_group=s.diag_group, diag_port=s.diag_port,
                         op_group=s.op_group, op_port=s.op_port,
                         interface_ip=s.interface_ip,
@@ -564,10 +602,7 @@ class TimingTab(QWidget):
         cells = [
             str(res.cycle_ms),
             "yes" if res.operational else "no",
-            str(res.n_cycles),
-            str(res.mean_us),
-            f"{res.overrun_frac:.2%}",
-            str(res.worst_overrun_us),
+            "yes" if res.still_healthy_after_wait else "no",
             res.verdict,
             res.detail,
         ]
@@ -575,7 +610,7 @@ class TimingTab(QWidget):
         for col, txt in enumerate(cells):
             item = QTableWidgetItem(txt)
             item.setForeground(color)
-            if col == 6:
+            if col == 3:
                 f = item.font(); f.setBold(True); item.setFont(f)
             self.table.setItem(r, col, item)
         self.table.resizeColumnsToContents()

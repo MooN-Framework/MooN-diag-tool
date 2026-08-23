@@ -50,7 +50,7 @@ class Node:
 
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
-        cmd = [str(self.binary), "node", "--config", str(self.config_path)]
+        cmd = [str(self.binary), "--config", str(self.config_path), "--log-dir", str(self.log_dir)]
         self._proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,

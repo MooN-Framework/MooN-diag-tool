@@ -50,12 +50,12 @@ class HardwareNode:
     password: str = ""                        # required -- see module docstring
     remote_binary: str = "/opt/voting/node"
     remote_config: str = "/opt/voting/node.toml"
-    remote_log: str = "/opt/voting/node.log"   # raw stdout+stderr target of start_cmd (pre-tracing-init
-                                                # failures, panics -- see module docstring)
-    remote_log_dir: str = "/opt/voting/logs"   # passed as the node binary's `--log-dir` (file-logging
-                                                # support added to the framework for HW deployment): holds
-                                                # `node_<id>_session_<session>.log` per run plus a stable
-                                                # `node_<id>_current.log` symlink to the latest one.
+    remote_log_dir: str = "/opt/voting/logs"   # THE one directory to know about, passed as the node
+                                                # binary's `--log-dir`: the framework itself maintains
+                                                # `node_<id>_current.log` as a symlink to the latest
+                                                # session's log inside here (see current_log_path()).
+                                                # remote_log (below) is derived from this, not separately
+                                                # configurable -- there's only one location to think about.
     # Commands run via ssh. `{bin}`/`{cfg}`/`{log}`/`{log_dir}` are
     # substituted with remote_binary/remote_config/remote_log/
     # remote_log_dir. Default is plain process management (kill + exec
@@ -64,16 +64,37 @@ class HardwareNode:
     # enables the framework's own per-session file logging; `{log}`
     # stays as a raw stdout+stderr catch-all (covers anything printed
     # before the tracing subscriber is initialized, e.g. a config-load
-    # failure, plus the default Rust panic hook). Both stay per-node
-    # editable strings so a future deployment (e.g. once a systemd unit
-    # does exist) can switch back without a code change: e.g.
+    # failure, plus the default Rust panic hook) written into the same
+    # log_dir. start_cmd/stop_cmd stay per-node editable strings so a
+    # future deployment (e.g. once a systemd unit does exist) can
+    # switch back without a code change: e.g.
     # start_cmd="systemctl restart voting-node",
     # stop_cmd="systemctl stop voting-node || true".
     start_cmd: str = "nohup {bin} --config {cfg} --log-dir {log_dir} > {log} 2>&1 < /dev/null & disown"
     stop_cmd: str = "pkill -f {bin} || true"
 
+    @property
+    def remote_log(self) -> str:
+        """Raw stdout+stderr catch-all path -- always inside
+        remote_log_dir, not separately configurable."""
+        return f"{self.remote_log_dir.rstrip('/')}/stdout.log"
+
     def resolved_start_cmd(self) -> str:
-        return self.start_cmd.format(
+        cmd_template = self.start_cmd
+        if "--log-dir" not in cmd_template and "{cfg}" in cmd_template:
+            # Auto-repair: a start_cmd saved before --log-dir became part
+            # of the default template (or hand-edited without it) would
+            # otherwise silently run the node with no file logging at all
+            # -- see validate_logging(). Insert it right after {cfg}
+            # rather than overwriting the whole command, so anything else
+            # about the saved command (env vars, extra flags, a
+            # completely different redirect target) survives untouched.
+            # Commands that don't reference {cfg} at all (e.g. a
+            # systemd-based start_cmd, see the class docstring) aren't
+            # touched -- there's no safe insertion point, and a systemd
+            # unit would define its own logging anyway.
+            cmd_template = cmd_template.replace("{cfg}", "{cfg} --log-dir {log_dir}", 1)
+        return cmd_template.format(
             bin=self.remote_binary, cfg=self.remote_config,
             log=self.remote_log, log_dir=self.remote_log_dir,
         )
@@ -85,9 +106,36 @@ class HardwareNode:
         )
 
     def current_log_path(self) -> str:
-        """Remote path of the `--log-dir` "current session" symlink
-        (see node.rs: `<log_dir>/node_<own_id>_current.log`)."""
+        """Remote path of the `--log-dir` "current session" symlink --
+        the framework's own node.rs maintains this to always point at
+        `node_<own_id>_current.log`, the latest session's log,
+        regardless of how many restarts have happened. THE file to
+        read for "what is this node doing right now"."""
         return f"{self.remote_log_dir.rstrip('/')}/node_{self.node_id}_current.log"
+
+    def validate_logging(self) -> Optional[str]:
+        """None if the SAVED start_cmd passes --log-dir to the binary.
+        Otherwise a human-readable heads-up -- resolved_start_cmd()
+        above already auto-repairs this for the actual run (as long as
+        {cfg} appears in the template), so this is informational, not
+        fatal: it just nudges towards fixing the saved config in
+        "Configure hardware nodes…" so the auto-repair (and this
+        message) stops being necessary.
+        """
+        if "--log-dir" not in self.start_cmd:
+            if "{cfg}" in self.start_cmd:
+                return (
+                    f"{self.host}: saved start_cmd doesn't pass \"--log-dir {{log_dir}}\" "
+                    f"to the binary -- auto-added for this run. Fix start_cmd in "
+                    f"\"Configure hardware nodes…\" to stop seeing this."
+                )
+            return (
+                f"{self.host}: start_cmd doesn't pass \"--log-dir {{log_dir}}\" to the "
+                f"binary, and doesn't reference {{cfg}} either so this can't be "
+                f"auto-repaired -- current_log_path() ({self.current_log_path()}) will "
+                f"never be written. Fix start_cmd in \"Configure hardware nodes…\"."
+            )
+        return None
 
 
 def enabled_nodes(nodes: list[HardwareNode]) -> list[HardwareNode]:
@@ -458,6 +506,45 @@ def get_os_uptime(node: HardwareNode, timeout: float = 15.0) -> Optional[float]:
         return None
 
 
+def get_service_uptime(
+    node: HardwareNode, unit: str = "moon-node.service", timeout: float = 15.0,
+) -> Optional[float]:
+    """Seconds since `unit` last entered the active state, per systemd --
+    i.e. how long the actual moon-node.service has been running, as
+    opposed to get_os_uptime() which only says when the machine booted
+    (the service could have been (re)started long after boot, or have
+    crashed and restarted since -- OS uptime alone would hide that).
+    Returns None if the unit isn't currently active, or on any
+    SSH/parse failure.
+
+    Computed from `systemctl show`'s ActiveEnterTimestampMonotonic
+    (microseconds since boot when the unit last became active) combined
+    with /proc/uptime (current seconds since boot) -- both come from
+    the same boot-relative clock, so subtracting them avoids parsing
+    any wall-clock timestamp/timezone at all.
+    """
+    try:
+        out = ssh_exec(
+            node,
+            "cat /proc/uptime && echo --- && "
+            f"systemctl show -p ActiveState -p ActiveEnterTimestampMonotonic "
+            f"--value {shlex.quote(unit)}",
+            timeout=timeout,
+        )
+    except SshError:
+        return None
+    try:
+        uptime_part, status_part = out.split("---", 1)
+        boot_uptime_s = float(uptime_part.strip().split()[0])
+        lines = [ln.strip() for ln in status_part.strip().splitlines() if ln.strip()]
+        active_state, active_enter_us = lines[0], lines[1]
+        if active_state != "active":
+            return None
+        return boot_uptime_s - (int(active_enter_us) / 1_000_000)
+    except (ValueError, IndexError):
+        return None
+
+
 def wait_for_reachable(node: HardwareNode, timeout: float = 90.0, interval: float = 3.0) -> bool:
     """Poll check_reachable() until it succeeds or timeout runs out.
 
@@ -490,7 +577,12 @@ def nodes_from_json(s: str) -> list[HardwareNode]:
         return []
     out: list[HardwareNode] = []
     for item in raw:
-        item = {k: v for k, v in item.items() if k != "key_path"}  # drop legacy field
+        # key_path: legacy field, dropped long ago. remote_log: used to
+        # be its own stored field, now derived from remote_log_dir (see
+        # HardwareNode.remote_log property) -- a config saved by an
+        # older version of this tool would otherwise fail to load here
+        # with a TypeError (unexpected keyword argument).
+        item = {k: v for k, v in item.items() if k not in ("key_path", "remote_log")}
         try:
             out.append(HardwareNode(**item))
         except TypeError:

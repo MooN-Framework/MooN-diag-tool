@@ -171,6 +171,7 @@ class TestTab(QWidget):
         self._get_settings = settings_provider
         self._save_settings = settings_saver
         self._proc: Optional[subprocess.Popen] = None
+        self._cancel_batch: bool = False
         self._reader: Optional[threading.Thread] = None
         self._scenario_meta: dict[str, ScenarioMeta] = {}
 
@@ -306,9 +307,13 @@ class TestTab(QWidget):
     # ---- mode toggle / hardware nodes -------------------------------------
 
     def _current_mode(self) -> str:
-        """Mode is derived, not chosen: hardware iff at least one hardware
-        node is both configured and enabled, simulated otherwise."""
+        """s.test_mode "auto" (default): derived from whether at least
+        one hardware node is both configured and enabled. "simulated"/
+        "hardware": forced regardless of what's configured -- see
+        Settings tab."""
         s = self._get_settings()
+        if s.test_mode in ("simulated", "hardware"):
+            return s.test_mode
         return "hardware" if enabled_nodes(nodes_from_json(s.hardware_nodes_json)) else "simulated"
 
     def _sync_mode_ui(self) -> None:
@@ -454,6 +459,7 @@ class TestTab(QWidget):
             it.setSelected(bool(it.flags() & Qt.ItemIsEnabled))
 
     def _on_stop(self) -> None:
+        self._cancel_batch = True
         if self._proc and self._proc.poll() is None:
             self._proc.terminate()
 
@@ -510,8 +516,44 @@ class TestTab(QWidget):
                                         f"No scenario fits {node_count} configured hardware "
                                         f"node(s). Configure more nodes or pick a smaller set.")
                     return
+        elif not selected:
+            # Simulated mode, nothing explicitly selected: run every
+            # discovered scenario individually (see the per-scenario
+            # loop below) -- same net effect as the old "hand pytest
+            # the whole directory" behaviour, just as an explicit file
+            # list so each one gets its own subprocess.
+            selected = sorted(self._scenario_meta.keys())
+            if not selected:
+                QMessageBox.warning(self, "No scenarios", f"No test_*.py files found in {d}.")
+                return
 
-        cmd = [sys.executable, "-m", "pytest"]
+        # Drop any scenario with zero actual test functions (e.g. a
+        # module-level pytest.mark.skip with nothing left to skip, see
+        # scenario_meta.py) regardless of mode or whether it got here
+        # via explicit selection or auto-detection -- running it would
+        # collect 0 items, pytest exits 5, and that's not a real
+        # pass/fail worth a subprocess or a batch-summary line.
+        runnable = []
+        for path_str in selected:
+            meta = self._scenario_meta.get(path_str)
+            if meta is not None and not meta.has_tests:
+                skipped.append(f"{Path(path_str).name}: {infeasible_reason(meta, node_count)}")
+            else:
+                runnable.append(path_str)
+        selected = runnable
+        if not selected:
+            QMessageBox.warning(self, "No runnable scenarios",
+                                "Every selected scenario has no test functions to run.")
+            return
+
+        cmd = [sys.executable, "-m", "pytest", "-s"]
+        # -s (--capture=no): without it, pytest swallows ALL stdout
+        # produced during a PASSING test -- including fixture setup,
+        # which is exactly where _HardwareFabric.restart_all()'s
+        # [restart]/[wait] lines come from. Those lines are the whole
+        # point of hardware mode's per-test node restart being visible
+        # at all; without -s they'd only ever show up in a failure
+        # traceback, i.e. never on the happy path.
         # Force our own pytest.ini + conftest so we never accidentally
         # pick up a stale one that happens to sit next to whatever test
         # path the user selected (e.g. an older copy in the Rust repo).
@@ -533,7 +575,10 @@ class TestTab(QWidget):
             # SSH restart_node() and to tail each node's --log-dir
             # current-log for wait_for_log() -- see conftest.py /
             # harness/hw_node.py. Written fresh per run, 0600, cleaned
-            # up in _run_worker's finally.
+            # up in _run_worker's finally. Shared across every
+            # scenario's own pytest invocation below -- its content
+            # doesn't change per scenario, only the running process
+            # does (and that's conftest's job, freshly, per subprocess).
             fd, tmp_name = tempfile.mkstemp(prefix="diag-tool-hw-nodes-", suffix=".json")
             os.close(fd)
             hw_nodes_file = Path(tmp_name)
@@ -548,10 +593,16 @@ class TestTab(QWidget):
                 f"--interface-ip={s.interface_ip}",
             ]
 
-        cmd += selected if selected else [str(d)]
         # cwd is the diag_tool repo root (same as -c's directory).
 
         env = os.environ.copy()
+        # Without this, the pytest child process's own stdout is
+        # block-buffered (not a tty) regardless of -s, so print() lines
+        # from restart_all()/wait_operational() can sit in the child's
+        # buffer instead of streaming to this tab live -- they'd still
+        # show up eventually (on flush/exit), just bunched up and late,
+        # easy to mistake for "not happening at all".
+        env["PYTHONUNBUFFERED"] = "1"
         for line in self.env_edit.toPlainText().splitlines():
             line = line.strip()
             if "=" in line and not line.startswith("#"):
@@ -564,22 +615,23 @@ class TestTab(QWidget):
 
         deploy_first = mode == "hardware" and self.deploy_chk.isChecked()
 
+        self._cancel_batch = False
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self._reader = threading.Thread(
             target=self._run_worker,
-            args=(cmd, repo_root, env, deploy_first, s, hw_nodes, hw_nodes_file),
+            args=(cmd, selected, repo_root, env, deploy_first, s, hw_nodes, hw_nodes_file, mode),
             name="test-run", daemon=True,
         )
         self._reader.start()
 
     # ---- deploy-then-run worker --------------------------------------------
 
-    def _run_worker(self, cmd: list[str], repo_root: Path, env: dict,
+    def _run_worker(self, base_cmd: list[str], scenarios: list[str], repo_root: Path, env: dict,
                      deploy_first: bool, s, hw_nodes: list[HardwareNode],
-                     hw_nodes_file: Optional[Path]) -> None:
+                     hw_nodes_file: Optional[Path], mode: str) -> None:
         try:
-            self._run_worker_inner(cmd, repo_root, env, deploy_first, s, hw_nodes)
+            self._run_worker_inner(base_cmd, scenarios, repo_root, env, deploy_first, s, hw_nodes, mode)
         except Exception as e:
             # Safety net: an unhandled exception anywhere in
             # _run_worker_inner (e.g. an unexpected error inside
@@ -596,8 +648,9 @@ class TestTab(QWidget):
                 except OSError:
                     pass
 
-    def _run_worker_inner(self, cmd: list[str], repo_root: Path, env: dict,
-                           deploy_first: bool, s, hw_nodes: list[HardwareNode]) -> None:
+    def _run_worker_inner(self, base_cmd: list[str], scenarios: list[str], repo_root: Path,
+                           env: dict, deploy_first: bool, s, hw_nodes: list[HardwareNode],
+                           mode: str) -> None:
         if deploy_first:
             if not hw_nodes:
                 self.line_received.emit(
@@ -632,6 +685,92 @@ class TestTab(QWidget):
                     return
                 self.line_received.emit("=== deploy done, starting tests ===\n")
 
+        if mode == "simulated":
+            # ONE pytest invocation covering every scenario. Simulated
+            # mode never had the state-leaking-between-tests problem
+            # hardware mode had: fabric_N there spawns brand-new local
+            # subprocesses on a brand-new tmp_path per TEST FUNCTION
+            # already (pytest's normal function-scoped fixture
+            # semantics are enough, no process-boundary trick needed).
+            # Splitting into one subprocess per scenario here would
+            # only re-run conftest's session-scoped `binary` fixture
+            # (cargo build) once per scenario instead of once for the
+            # whole batch -- pure overhead, no correctness benefit.
+            self._run_single_pytest_invocation(base_cmd, scenarios, repo_root, env)
+            return
+
+        # Hardware mode: one pytest subprocess PER scenario,
+        # sequentially -- not one subprocess covering every selected
+        # scenario. This matters here specifically: conftest's fabric_N
+        # fixture restarts every node fresh at the START of the first
+        # test it sees in a process (see _HardwareFabric.restart_all())
+        # -- giving each scenario its own subprocess means that ALWAYS
+        # happens against a brand-new interpreter, rather than relying
+        # only on pytest's in-process fixture scoping to reset state
+        # between test FUNCTIONS within one shared process. Slower
+        # (repeated pytest/conftest startup per scenario) but
+        # bulletproof: no way for one scenario's leftover state (an
+        # isolated node, an altered session_id, module-level caching)
+        # to bleed into the next one.
+        total = len(scenarios)
+        results: list[tuple[str, int]] = []  # (scenario name, exit code)
+        for i, scenario_path in enumerate(scenarios, start=1):
+            if self._cancel_batch:
+                self.line_received.emit("\n[cancelled] stopping before next scenario")
+                break
+
+            name = Path(scenario_path).name
+            self.line_received.emit(f"\n=== [{i}/{total}] {name} ===")
+            cmd = base_cmd + [scenario_path]
+            self.line_received.emit(f"$ (cwd={repo_root}) " + " ".join(shlex.quote(c) for c in cmd))
+            try:
+                self._proc = subprocess.Popen(
+                    cmd, cwd=repo_root, env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1,
+                )
+            except OSError as e:
+                self.line_received.emit(f"[Error] pytest could not be started: {e}")
+                results.append((name, -1))
+                continue
+
+            assert self._proc.stdout
+            for line in self._proc.stdout:
+                self.line_received.emit(line.rstrip("\n"))
+            rc = self._proc.wait()
+            self.line_received.emit(f"[{name}] exit={rc}")
+            results.append((name, rc))
+
+        # rc==5 is pytest's "no tests were collected" -- distinct from
+        # an actual failure. The has_tests pre-filter in _on_run should
+        # already keep such scenarios out of `scenarios` entirely, but
+        # this stays as a defensive fallback (e.g. a scenario that
+        # skips everything via a runtime condition rather than a static
+        # module-level marker, which static analysis can't catch).
+        passed = sum(1 for _, rc in results if rc == 0)
+        no_tests = [(name, rc) for name, rc in results if rc == 5]
+        failed = [(name, rc) for name, rc in results if rc not in (0, 5)]
+        self.line_received.emit(
+            f"\n=== batch done: {passed}/{len(results)} passed"
+            + (f", {len(no_tests)} had no tests to run" if no_tests else "")
+            + (f", {len(failed)} failed/errored" if failed else "")
+            + " ==="
+        )
+        for name, rc in failed:
+            self.line_received.emit(f"  FAILED {name} (exit={rc})")
+        for name, rc in no_tests:
+            self.line_received.emit(f"  NO TESTS {name} (exit={rc})")
+        self.line_received.emit("__RUN_DONE__")
+
+    def _run_single_pytest_invocation(self, base_cmd: list[str], scenarios: list[str],
+                                       repo_root: Path, env: dict) -> None:
+        """Simulated-mode path: every selected scenario handed to ONE
+        pytest process in a single call, same as before per-scenario
+        subprocess isolation was added for hardware mode. See the
+        caller's comment for why simulated mode doesn't need (and
+        shouldn't pay the cost of) splitting this into one subprocess
+        per scenario."""
+        cmd = base_cmd + scenarios
         self.line_received.emit(f"$ (cwd={repo_root}) " + " ".join(shlex.quote(c) for c in cmd))
         try:
             self._proc = subprocess.Popen(
@@ -685,6 +824,9 @@ class TestTab(QWidget):
         for hn in sorted(nodes, key=lambda n: n.node_id):
             self.line_received.emit(f"[deploy] {hn.host} stopping moon-node.service (if present)")
             stop_moon_node_service(hn)
+            warn = hn.validate_logging()
+            if warn:
+                self.line_received.emit(f"[deploy] WARNING: {warn}")
             try:
                 ensure_remote_dirs(hn)
             except SshError as e:
@@ -695,8 +837,24 @@ class TestTab(QWidget):
                 fabric_group=s.op_group, fabric_port=s.op_port,
                 diag_group=s.diag_group, diag_port=s.diag_port,
                 interface=s.node_network_interface,
+                init_sync_timeout_ms=15_000,  # real hardware needs more headroom than the 2000ms default
             )
             toml_text = render_toml_str(spec)
+            # Kill any already-running instance of the harness's own
+            # process BEFORE pushing a new binary over it -- stop_moon_node_service()
+            # above only stops the systemd unit; a process this tool
+            # itself started earlier via nohup+exec (e.g. a previous Test
+            # tab or Timing tab run) is still running here otherwise, and
+            # scp trying to overwrite a currently-executing binary file
+            # fails with ETXTBSY ("text file busy"), which shows up as a
+            # generic "dest open ... Failure" -- easy to mistake for a
+            # missing-directory problem, it isn't one.
+            try:
+                ssh_exec(hn, hn.resolved_stop_cmd(), timeout=30.0)
+            except SshError as e:
+                self.line_received.emit(f"[deploy] {hn.host} stop_cmd failed (continuing): {e.output}")
+            time.sleep(0.3)  # let the old process actually exit before we try to overwrite its binary
+
             self.line_received.emit(f"[deploy] {hn.host} → config {hn.remote_config}")
             try:
                 scp_bytes(hn, toml_text.encode(), hn.remote_config)
@@ -705,10 +863,6 @@ class TestTab(QWidget):
             except SshError as e:
                 self.line_received.emit(f"[deploy] {hn.host} FAILED (transfer): {e.output}")
                 return False
-            try:
-                ssh_exec(hn, hn.resolved_stop_cmd(), timeout=30.0)
-            except SshError as e:
-                self.line_received.emit(f"[deploy] {hn.host} stop_cmd failed (continuing): {e.output}")
             self.line_received.emit(f"[deploy] {hn.host} starting")
             try:
                 ssh_exec(hn, hn.resolved_start_cmd(), timeout=30.0)

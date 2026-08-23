@@ -1,14 +1,18 @@
 """
 Timing sweep orchestrator.
 
-Runs a descending sweep over candidate cycle durations. For each
-candidate:
+Runs a descending sweep over candidate cycle durations, looking for the
+smallest cycle_ms the system still runs stably at. For each candidate:
   1. Prepare configs (proportional in-cycle offsets).
   2. Bring nodes up (local subprocess spawn OR SSH restart).
   3. Wait for operational via diag get_status.
-  4. Measure MEASURE_S seconds of STATE frames via CycleMeasurement.
-  5. Tear nodes down.
-  6. Compute verdict (STABLE / TOO_MANY_OVERRUNS / NO_OPERATIONAL /
+  4. Wait `stability_wait_s` seconds, doing nothing.
+  5. Check: is every expected node STILL reporting a healthy state
+     (i.e. not Startup/InitSync/Isolation/Failsafe/ErrorManagement) via
+     diag get_status? That's the whole check -- "is the full system
+     still up and running after waiting", nothing more elaborate.
+  6. Tear nodes down.
+  7. Compute verdict (STABLE / NOT_STABLE / NO_OPERATIONAL /
      NODE_DIED / EXCEPTION).
 
 Emits `on_result(candidate_result)` per candidate so the UI can update
@@ -26,7 +30,6 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .diag_client import DiagClient
-from .operational_listener import OperationalListener
 from .ssh_deploy import (
     HardwareNode,
     SshError,
@@ -38,7 +41,6 @@ from .ssh_deploy import (
     stop_moon_node_service,
     tail_remote_logs,
 )
-from .timing_measure import CycleMeasurement
 
 # The test harness lives alongside the diag tool in the same repo now,
 # so we can reuse its config generation directly.
@@ -51,10 +53,17 @@ def render_config_to_str(spec) -> str:
 
 
 VERDICT_STABLE = "STABLE"
-VERDICT_OVERRUNS = "TOO_MANY_OVERRUNS"
+VERDICT_NOT_STABLE = "NOT_STABLE"
 VERDICT_NO_OP = "NO_OPERATIONAL"
 VERDICT_NODE_DIED = "NODE_DIED"
 VERDICT_EXCEPTION = "EXCEPTION"
+
+# States that mean "this node is up but not in normal service" -- a node
+# reporting one of these after the stability wait means the candidate
+# cycle_ms did NOT run stably, full stop. Includes the two "still
+# booting" states too, reused as the not-yet-operational check.
+NOT_YET_UP_STATES = {"Startup", "InitSync"}
+UNHEALTHY_STATES = NOT_YET_UP_STATES | {"Isolation", "Failsafe", "ErrorManagement"}
 
 
 @dataclass
@@ -62,10 +71,8 @@ class SweepParams:
     candidates_ms: list[int]
     nominal: int
     minimum: int
-    measure_s: float
+    stability_wait_s: float  # how long to wait, doing nothing, before re-checking every node is still healthy
     setup_timeout_s: float
-    max_overrun_fraction: float
-    overrun_tolerance_pct: float
     diag_group: str
     diag_port: int
     op_group: str
@@ -83,10 +90,7 @@ class SweepParams:
 class CandidateResult:
     cycle_ms: int
     operational: bool
-    n_cycles: int
-    mean_us: int
-    overrun_frac: float
-    worst_overrun_us: int
+    still_healthy_after_wait: bool
     verdict: str
     detail: str = ""
 
@@ -127,8 +131,7 @@ class TimingSweep:
                 except Exception as e:  # never let a candidate crash the sweep
                     res = CandidateResult(
                         cycle_ms=cycle_ms, operational=False,
-                        n_cycles=0, mean_us=0, overrun_frac=1.0,
-                        worst_overrun_us=0, verdict=VERDICT_EXCEPTION,
+                        still_healthy_after_wait=False, verdict=VERDICT_EXCEPTION,
                         detail=f"{type(e).__name__}: {e}",
                     )
                     self.on_line(f"[exception] {res.detail}")
@@ -139,26 +142,13 @@ class TimingSweep:
             self.on_done(smallest)
 
     def _run_candidate(self, cycle_ms: int) -> CandidateResult:
-        # --- 1. bring nodes up + attach a measurement listener ----------
+        # --- 1. bring nodes up -----------------------------------------
         expected_ids = self._expected_node_ids()
-        listener = OperationalListener(
-            multicast_group=self.p.op_group,
-            port=self.p.op_port,
-            interface_ip=self.p.interface_ip,
-        )
-        listener.start()
+        if self.mode == "simulated":
+            self._sim_start(cycle_ms)
+        else:
+            self._hw_start(cycle_ms)
         try:
-            meas = CycleMeasurement(
-                target_cycle_ms=cycle_ms,
-                overrun_tolerance_pct=self.p.overrun_tolerance_pct,
-            )
-            meas.attach(listener)
-
-            if self.mode == "simulated":
-                self._sim_start(cycle_ms)
-            else:
-                self._hw_start(cycle_ms)
-
             # --- 2. wait for operational (via diag get_status) -----------
             diag = DiagClient(
                 multicast_group=self.p.diag_group,
@@ -170,89 +160,112 @@ class TimingSweep:
                 operational = self._wait_operational(
                     diag, expected_ids, self.p.setup_timeout_s
                 )
+
+                if not operational:
+                    self._log_node_tails(cycle_ms)
+                    return CandidateResult(
+                        cycle_ms=cycle_ms, operational=False,
+                        still_healthy_after_wait=False, verdict=VERDICT_NO_OP,
+                        detail=(f"only {len(expected_ids)} nodes expected, "
+                                f"not all reached operational in "
+                                f"{self.p.setup_timeout_s}s "
+                                f"(see log for node stdout tails)"),
+                    )
+
+                # --- 3. wait, doing nothing -------------------------------
+                self.on_line(f"waiting {self.p.stability_wait_s:.1f}s to check stability …")
+                end = time.monotonic() + self.p.stability_wait_s
+                while time.monotonic() < end:
+                    if self._cancel.is_set():
+                        break
+                    time.sleep(0.1)
+
+                # --- 4. check liveness (simulated) ------------------------
+                died = False
+                if self.mode == "simulated":
+                    died = any(p.poll() is not None for p in self._local_procs)
+
+                # --- 5. is the WHOLE system still healthy? ----------------
+                # A single diag get_status round per node, right now --
+                # this is deliberately just "ask each node what state
+                # it's in and check none of them fell over", not a
+                # statistics-gathering pass. See _probe_states().
+                states = self._probe_states(diag, expected_ids)
+                unhealthy = {
+                    nid: st for nid, st in states.items()
+                    if st is None or st.get("node_state") in UNHEALTHY_STATES
+                }
+                still_healthy = not unhealthy and not died
             finally:
                 diag.stop()
 
-            if not operational:
-                # Surface WHY the nodes did not come up — tail their
-                # logs. Simulated: local stdout log files. Hardware:
-                # the node binary's own --log-dir file log (plus the
-                # raw stdout/stderr catch-all) fetched over SSH.
-                detail_lines: list[str] = []
-                if self.mode == "simulated" and self.p.local_work_dir is not None:
-                    log_dir = self.p.local_work_dir / f"cycle_{cycle_ms}ms" / "logs"
-                    for lp in sorted(log_dir.glob("node_*.log")):
-                        try:
-                            tail = lp.read_text(errors="replace").splitlines()[-8:]
-                        except OSError:
-                            continue
-                        detail_lines.append(f"--- {lp.name} (tail) ---")
-                        detail_lines.extend(tail)
-                elif self.mode == "hardware":
-                    for hn in sorted(self.p.hardware_nodes, key=lambda n: n.node_id):
-                        detail_lines.append(f"=== node {hn.node_id} ({hn.host}) ===")
-                        detail_lines.extend(tail_remote_logs(hn, lines=8).splitlines())
-                if detail_lines:
-                    for ln in detail_lines:
-                        self.on_line(ln)
-                return CandidateResult(
-                    cycle_ms=cycle_ms, operational=False,
-                    n_cycles=0, mean_us=0, overrun_frac=1.0,
-                    worst_overrun_us=0, verdict=VERDICT_NO_OP,
-                    detail=(f"only {len(expected_ids)} nodes expected, "
-                            f"not all reached operational in "
-                            f"{self.p.setup_timeout_s}s "
-                            f"(see log for node stdout tails)"),
-                )
-
-            # --- 3. measure ----------------------------------------------
-            self.on_line(f"measuring for {self.p.measure_s:.1f}s …")
-            end = time.monotonic() + self.p.measure_s
-            while time.monotonic() < end:
-                if self._cancel.is_set():
-                    break
-                time.sleep(0.1)
-
-            # --- 4. check liveness (simulated) ---------------------------
-            died = False
-            if self.mode == "simulated":
-                died = any(p.poll() is not None for p in self._local_procs)
-
-            # --- 5. verdict ----------------------------------------------
-            agg = meas.aggregate()
-            verdict = self._verdict(agg, died)
-            detail = ""
-            if verdict == VERDICT_NODE_DIED:
-                detail = "one or more local node processes exited"
-            elif verdict == VERDICT_OVERRUNS:
-                detail = (f"{agg['overrun_frac']:.2%} > "
-                          f"{self.p.max_overrun_fraction:.2%} (target)")
+            # --- 6. verdict --------------------------------------------------
+            if died:
+                verdict, detail = VERDICT_NODE_DIED, "one or more local node processes exited"
+            elif unhealthy:
+                verdict = VERDICT_NOT_STABLE
+                parts = []
+                for nid, st in sorted(unhealthy.items()):
+                    state = st.get("node_state") if st else None
+                    parts.append(f"node {nid}: {state if state else 'no response'}")
+                detail = "; ".join(parts)
+            else:
+                verdict, detail = VERDICT_STABLE, ""
 
             return CandidateResult(
                 cycle_ms=cycle_ms,
                 operational=True,
-                n_cycles=int(agg["n_cycles"]),
-                mean_us=int(agg["mean_us"]),
-                overrun_frac=float(agg["overrun_frac"]),
-                worst_overrun_us=int(agg["worst_overrun_us"]),
+                still_healthy_after_wait=still_healthy,
                 verdict=verdict,
                 detail=detail,
             )
         finally:
-            listener.stop()
             if self.mode == "simulated":
                 self._sim_stop()
             else:
                 self._hw_stop()
 
-    def _verdict(self, agg: dict, died: bool) -> str:
-        if died:
-            return VERDICT_NODE_DIED
-        if agg["overrun_frac"] > self.p.max_overrun_fraction:
-            return VERDICT_OVERRUNS
-        if agg["nodes_seen"] < self.p.nominal:
-            return VERDICT_NO_OP
-        return VERDICT_STABLE
+    def _log_node_tails(self, cycle_ms: int) -> None:
+        """Surface WHY nodes didn't come up (or didn't stay healthy) by
+        tailing their logs. Simulated: local stdout log files. Hardware:
+        the node binary's own --log-dir current-session log (plus the
+        raw stdout/stderr catch-all) fetched over SSH."""
+        if self.mode == "simulated" and self.p.local_work_dir is not None:
+            log_dir = self.p.local_work_dir / f"cycle_{cycle_ms}ms" / "logs"
+            for lp in sorted(log_dir.glob("node_*.log")):
+                try:
+                    tail = lp.read_text(errors="replace").splitlines()[-8:]
+                except OSError:
+                    continue
+                self.on_line(f"--- {lp.name} (tail) ---")
+                for ln in tail:
+                    self.on_line(ln)
+        elif self.mode == "hardware":
+            for hn in sorted(self.p.hardware_nodes, key=lambda n: n.node_id):
+                self.on_line(f"=== node {hn.node_id} ({hn.host}) ===")
+                for ln in tail_remote_logs(hn, lines=8).splitlines():
+                    self.on_line(ln)
+
+    def _probe_states(self, diag: DiagClient, ids: list[int]) -> dict[int, Optional[dict]]:
+        """One diag get_status round per node, in parallel. None for a
+        node that didn't answer in time (treated as unhealthy by the
+        caller -- a node that can't even be asked isn't "stable")."""
+        results: dict[int, Optional[dict]] = {}
+        lock = threading.Lock()
+
+        def probe(nid: int) -> None:
+            st = diag.get_status(nid, timeout=1.5)
+            with lock:
+                results[nid] = st
+
+        threads = [threading.Thread(target=probe, args=(nid,), daemon=True) for nid in ids]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=2.0)
+        for nid in ids:
+            results.setdefault(nid, None)
+        return results
 
     def _wait_operational(self, diag: DiagClient, ids: list[int],
                           timeout: float) -> bool:
@@ -291,7 +304,7 @@ class TimingSweep:
                 if st is None:
                     continue
                 state = st.get("node_state", "")
-                if state and state not in ("Startup", "InitSync"):
+                if state and state not in NOT_YET_UP_STATES:
                     ready.add(nid)
 
             self.on_line(
@@ -331,6 +344,7 @@ class TimingSweep:
                 diag_group=self.p.diag_group,
                 diag_port=self.p.diag_port,
                 interface="lo",  # simulated nodes are local subprocesses on loopback -- always "lo"
+                init_sync_timeout_ms=15_000,
             )
             cfg_path = render_config(spec, cfg_dir / f"node_{own_id}.toml")
             log_path = log_dir / f"node_{own_id}.log"
@@ -384,6 +398,9 @@ class TimingSweep:
         for hn in self.p.hardware_nodes:
             self.on_line(f"[{hn.host}] stopping moon-node.service (if present)")
             stop_moon_node_service(hn)
+            warn = hn.validate_logging()
+            if warn:
+                self.on_line(f"WARNING: {warn}")
             try:
                 ensure_remote_dirs(hn)
             except SshError as e:
@@ -398,6 +415,7 @@ class TimingSweep:
                 diag_group=self.p.diag_group,
                 diag_port=self.p.diag_port,
                 interface=self.p.node_interface,  # e.g. "eth0" -- the node's own interface, not this machine's
+                init_sync_timeout_ms=15_000,  # real hardware needs more headroom than the 2000ms default
             )
             toml_text = render_config_to_str(spec)
             self.on_line(f"[{hn.host}] deploying config → {hn.remote_config}")
@@ -407,6 +425,7 @@ class TimingSweep:
                 ssh_exec(hn, hn.resolved_stop_cmd(), timeout=30.0)
             except SshError as e:
                 self.on_line(f"[{hn.host}] stop_cmd failed (continuing): {e.output}")
+            time.sleep(0.3)  # let the old process actually exit before the new one rebinds its sockets
             self.on_line(f"[{hn.host}] starting")
             try:
                 ssh_exec(hn, hn.resolved_start_cmd(), timeout=30.0)

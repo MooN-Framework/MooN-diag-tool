@@ -119,6 +119,14 @@ class LoggingTab(QWidget):
     def on_op_frame(self, frame: DecodedFrame, ts_mono: float) -> None:
         self._buf.append(("op", ts_mono, frame))
 
+    def on_op_frame_batch(self, batch: list) -> None:
+        """Same as on_op_frame, for a whole batch delivered as one Qt
+        event -- see main_window's _flush_op_frame_queue. Appending in
+        a single Python loop here is far cheaper than N separate
+        cross-thread signal deliveries at high frame rates."""
+        for frame, ts_mono in batch:
+            self._buf.append(("op", ts_mono, frame))
+
     def on_diag_telegram(self, tel: DiagTelegram) -> None:
         self._buf.append(("diag", tel.ts_mono, tel))
 

@@ -249,13 +249,30 @@ def scaled_timing(cycle_ms: int) -> dict[str, int]:
     (cycle=20 -> SI=5, SR=10, SA=14, CRC=17). Rounds to whole ms.
 
     For very small cycle_ms the offsets would collapse; a floor of 1 ms
-    keeps them strictly increasing so validate() still accepts the config.
+    keeps them strictly increasing so validate() still accepts the
+    config. But that floor eventually pushes crc_offset_ms up to or
+    past cycle_ms itself -- the framework's own config validation then
+    panics with "crc_offset must fit into cycle_duration" (config.rs),
+    which only surfaces after a full deploy + start attempt on real
+    hardware. Raise here instead, immediately, with a clear message --
+    every caller (Config tab, Package tab, Test tab, Timing sweep)
+    already handles exceptions from make_spec() sanely, so this turns
+    an opaque remote crash + timeout into an instant, readable error.
     """
     ratio = cycle_ms / 20
     si = max(1, round(5 * ratio))
     sr = max(si + 1, round(10 * ratio))
     sa = max(sr + 1, round(14 * ratio))
     crc = max(sa + 1, round(17 * ratio))
+    if crc >= cycle_ms:
+        raise ValueError(
+            f"cycle_ms={cycle_ms} is too small for this scaling scheme: "
+            f"the four in-cycle phase offsets need strictly-increasing "
+            f"whole-ms spacing (share_inputs={si}, share_result={sr}, "
+            f"send_ack={sa}, crc={crc}), which no longer fits inside a "
+            f"{cycle_ms}ms cycle (crc_offset_ms must be < cycle_duration_ms). "
+            f"Minimum viable cycle_ms here is 6."
+        )
     return dict(
         cycle_duration_ms=cycle_ms,
         share_inputs_offset_ms=si,

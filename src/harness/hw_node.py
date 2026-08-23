@@ -56,6 +56,11 @@ class RemoteNode:
     _lines: deque = field(default_factory=lambda: deque(maxlen=100_000), init=False, repr=False)
     _lines_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _new_line_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    # Monotonic count of every line ever appended, NOT reset when the
+    # bounded _lines deque evicts old entries -- see line_count / the
+    # `after` param on wait_for_log for why this matters (stale-match
+    # bug across restarts).
+    _total_lines_seen: int = field(default=0, init=False, repr=False)
     exit_code: Optional[int] = field(default=None, init=False)
 
     def start_tailing(self) -> None:
@@ -76,35 +81,59 @@ class RemoteNode:
             line = line.rstrip("\n")
             with self._lines_lock:
                 self._lines.append(line)
+                self._total_lines_seen += 1
             self._new_line_event.set()
 
-    def wait_for_log(self, pattern: str | Pattern, timeout: float = 5.0) -> Optional[re.Match]:
+    @property
+    def line_count(self) -> int:
+        """Monotonic count of every log line ever seen on this node's
+        tail, independent of the (bounded, maxlen=100_000) _lines
+        buffer's own eviction. Snapshot this right before restarting the
+        node and pass it as wait_for_log(after=...) so the wait only
+        matches lines produced by the NEW session -- otherwise, once a
+        pattern has matched once (e.g. the very first successful boot),
+        it keeps matching that same stale buffered line on every later
+        restart, making a readiness check report success instantly
+        without ever confirming the new session actually came up. This
+        is exactly what made restart_all() (see conftest.py's
+        _HardwareFabric) appear to work while every test after the
+        first one actually ran against a not-yet-ready system.
+        """
+        with self._lines_lock:
+            return self._total_lines_seen
+
+    def wait_for_log(
+        self, pattern: str | Pattern, timeout: float = 5.0, after: int = 0,
+    ) -> Optional[re.Match]:
         """Identical semantics to harness.node.Node.wait_for_log: scan
         already-seen lines first (covers events that already happened
-        before this call, incl. ones from a session before the last
-        restart_node()), then wait for new ones until timeout."""
+        before this call), then wait for new ones until timeout.
+
+        `after`: only lines with a global sequence number >= `after`
+        (see line_count) are considered -- pass a line_count snapshot
+        taken right before a restart to skip stale pre-restart lines.
+        Default 0 preserves the original "match anything ever seen"
+        behaviour every existing caller relies on.
+        """
         pat = re.compile(pattern) if isinstance(pattern, str) else pattern
         deadline = time.monotonic() + timeout
 
-        with self._lines_lock:
-            existing = list(self._lines)
-        for ln in existing:
-            m = pat.search(ln)
-            if m:
-                return m
-
-        seen_count = len(existing)
-        while time.monotonic() < deadline:
-            self._new_line_event.wait(timeout=0.1)
-            self._new_line_event.clear()
+        while True:
             with self._lines_lock:
-                new = list(self._lines)[seen_count:]
-                seen_count = len(self._lines)
-            for ln in new:
+                # _lines may have evicted lines older than `after` once
+                # it's full (maxlen) -- reconstruct how many were
+                # dropped so the slice stays correct regardless.
+                evicted = max(0, self._total_lines_seen - len(self._lines))
+                start = max(0, after - evicted)
+                candidates = list(self._lines)[start:]
+            for ln in candidates:
                 m = pat.search(ln)
                 if m:
                     return m
-        return None
+            if time.monotonic() >= deadline:
+                return None
+            self._new_line_event.wait(timeout=0.1)
+            self._new_line_event.clear()
 
     @property
     def log_lines(self) -> list[str]:

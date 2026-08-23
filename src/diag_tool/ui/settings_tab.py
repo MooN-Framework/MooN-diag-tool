@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -105,24 +106,34 @@ class SettingsTab(QWidget):
         pf.addRow("Package signing key", self._with_browse(self.signing_key, is_file=True))
         outer.addWidget(paths)
 
-        # Test mode -- no longer a manual choice, see Test/Timing tab:
-        # mode is derived from whether any hardware node is configured.
-        # Kept here as an info panel so it's not a mystery where the
-        # switch went.
+        # Test mode -- by default still derived automatically (see
+        # Test/Timing tab) from whether any hardware node is
+        # configured+enabled. This dropdown overrides that when you
+        # want to run a quick simulated check without disabling all
+        # your hardware nodes first, or vice versa.
         tm = QGroupBox("Test mode")
         tf = QFormLayout(tm); tf.setContentsMargins(12, 20, 12, 12); tf.setSpacing(10)
+        self.test_mode = QComboBox()
+        self.test_mode.addItem("Auto (derive from configured hardware nodes)", "auto")
+        self.test_mode.addItem("Force simulated", "simulated")
+        self.test_mode.addItem("Force hardware", "hardware")
+        idx = self.test_mode.findData(s.test_mode)
+        self.test_mode.setCurrentIndex(idx if idx >= 0 else 0)
         hint = QLabel(
             "<span style='color:#949BA4'>"
-            "Mode is no longer chosen here -- it's derived automatically "
-            "in the Test/Timing tab from whether any hardware node is "
-            "configured ('Configure hardware nodes…'):<br>"
-            "<b>simulated</b> (0 nodes): pytest spawns nodes locally via cargo.<br>"
-            "<b>hardware</b> (&ge;1 node): uses the configured nodes over "
-            "the multicast groups + SSH deploy."
+            "<b>Auto</b>: simulated with 0 configured+enabled hardware nodes, "
+            "hardware with &ge;1 ('Configure hardware nodes…' in the Test/"
+            "Timing tab).<br>"
+            "<b>Force simulated</b>: pytest/sweep always spawns nodes locally "
+            "via cargo, even if hardware nodes are configured.<br>"
+            "<b>Force hardware</b>: always uses the configured nodes over the "
+            "multicast groups + SSH deploy -- fails clearly if none are "
+            "configured+enabled."
             "</span>"
         )
         hint.setTextFormat(Qt.RichText)
         hint.setWordWrap(True)
+        tf.addRow("Mode", self.test_mode)
         tf.addRow(hint)
         outer.addWidget(tm)
 
@@ -183,5 +194,6 @@ class SettingsTab(QWidget):
             moon_pi_gen_repo_path=self.pi_gen_repo.text().strip(),
             moon_signing_key_path=self.signing_key.text().strip(),
             scenarios_path="",  # obsolete: tests live in this repo now
+            test_mode=self.test_mode.currentData(),
         )
         self.settings_applied.emit(s)

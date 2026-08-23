@@ -99,8 +99,13 @@ class NodeRegistry:
             v.last_seq = seq_num
             v.last_session = session_id
             v.frame_count += 1
-            changed = NodeView(**{k: getattr(v, k) for k in v.__slots__})
             cbs = list(self._on_change_cbs)
+            # The copy below is real work (a getattr per slot) done on
+            # whatever thread called this -- often the UDP rx thread, at
+            # up to hundreds/thousands of frames/sec with a small
+            # cycle_ms. Building it when nothing's actually listening is
+            # pure waste that slows down frame ingestion for no reason.
+            changed = NodeView(**{k: getattr(v, k) for k in v.__slots__}) if cbs else None
         for cb in cbs:
             try:
                 cb(changed)
@@ -128,8 +133,8 @@ class NodeRegistry:
                 if v.session_started_at == 0.0 or new_session != v.last_session:
                     v.session_started_at = now
                 v.last_session = new_session
-            changed = NodeView(**{k: getattr(v, k) for k in v.__slots__})
             cbs = list(self._on_change_cbs)
+            changed = NodeView(**{k: getattr(v, k) for k in v.__slots__}) if cbs else None
         for cb in cbs:
             try:
                 cb(changed)

@@ -18,7 +18,7 @@ import time
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
@@ -33,12 +33,13 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.node_registry import NodeRegistry
-from ..core.ssh_deploy import get_os_uptime, nodes_from_json
+from ..core.wire_decoder import NODE_STATE_NAMES
+from ..core.ssh_deploy import get_os_uptime, get_service_uptime, nodes_from_json
 
 
 HEADERS = [
     "ID", "State", "Seq", "Session", "Frames", "Last seen",
-    "Process uptime", "OS uptime", "Peers (diag)",
+    "Process uptime", "OS uptime", "moon-node.service uptime", "Peers (diag)",
 ]
 LOST_AFTER_S = 10.0
 
@@ -81,6 +82,11 @@ class StatusTab(QWidget):
         # node_id -> (os_uptime_seconds_at_fetch, local_monotonic_fetch_time)
         self._os_uptime: dict[int, tuple[float, float]] = {}
         self._os_uptime_lock = threading.Lock()
+        # node_id -> (moon-node.service_uptime_seconds_at_fetch, local_monotonic_fetch_time)
+        # None as the seconds value means "unit not active" (distinct from
+        # "never fetched", which is simply not being in this dict at all).
+        self._svc_uptime: dict[int, tuple[Optional[float], float]] = {}
+        self._svc_uptime_lock = threading.Lock()
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 20, 20, 20)
@@ -95,12 +101,12 @@ class StatusTab(QWidget):
         self.poll_btn = QPushButton("Poll all")
         self.poll_btn.setProperty("accent", True)
         self.poll_btn.clicked.connect(self._on_poll_all)
-        self.uptime_btn = QPushButton("Refresh OS uptime")
+        self.uptime_btn = QPushButton("Refresh OS/service uptime")
         self.uptime_btn.setToolTip(
             "SSHes into every discovered node that matches a configured, "
-            "enabled hardware node and reads /proc/uptime. Simulated-mode "
-            "or unconfigured nodes show \"—\" since there's nothing to SSH "
-            "into."
+            "enabled hardware node and reads /proc/uptime plus "
+            "moon-node.service's systemctl status. Simulated-mode or "
+            "unconfigured nodes show \"—\" since there's nothing to SSH into."
         )
         self.uptime_btn.clicked.connect(self._on_refresh_os_uptime)
         self.clear_btn = QPushButton("Clear registry")
@@ -116,6 +122,17 @@ class StatusTab(QWidget):
         self.table.setHorizontalHeaderLabels(HEADERS)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
+        # State column fixed width: content-based auto-resize (the mode
+        # every other column uses) makes the table jump/twitch sideways
+        # every time a node's state text changes length (e.g. "Startup"
+        # vs "SystemStateCrcExchange" vs "Lost"). Size it once to the
+        # longest string it could ever show and pin it there instead.
+        possible_state_texts = list(NODE_STATE_NAMES.values()) + ["Lost", "?"]
+        state_col_width = max(
+            QFontMetrics(self.table.font()).horizontalAdvance(t) for t in possible_state_texts
+        ) + 24  # padding to match the cell margins Qt applies to other ResizeToContents columns
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+        self.table.setColumnWidth(1, state_col_width)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -210,6 +227,9 @@ class StatusTab(QWidget):
                     if secs is not None:
                         with self._os_uptime_lock:
                             self._os_uptime[nid] = (secs, time.monotonic())
+                    svc_secs = get_service_uptime(hn)  # None = fetched OK but unit not active
+                    with self._svc_uptime_lock:
+                        self._svc_uptime[nid] = (svc_secs, time.monotonic())
             finally:
                 self._uptime_done.emit()
 
@@ -218,7 +238,7 @@ class StatusTab(QWidget):
     @Slot()
     def _on_uptime_done(self) -> None:
         self.uptime_btn.setEnabled(True)
-        self.uptime_btn.setText("Refresh OS uptime")
+        self.uptime_btn.setText("Refresh OS/service uptime")
 
     def _on_selection(self) -> None:
         row = self.table.currentRow()
@@ -274,6 +294,18 @@ class StatusTab(QWidget):
                 live_estimate = base_secs + (now - fetched_at)
                 os_uptime = f"{_fmt_duration(live_estimate)} (synced {int(now - fetched_at)}s ago)"
 
+            with self._svc_uptime_lock:
+                svc_entry = self._svc_uptime.get(v.node_id)
+            if svc_entry is None:
+                svc_uptime = "—"
+            else:
+                svc_secs, svc_fetched_at = svc_entry
+                if svc_secs is None:
+                    svc_uptime = f"not active (synced {int(now - svc_fetched_at)}s ago)"
+                else:
+                    svc_live = svc_secs + (now - svc_fetched_at)
+                    svc_uptime = f"{_fmt_duration(svc_live)} (synced {int(now - svc_fetched_at)}s ago)"
+
             cells = [
                 str(v.node_id),
                 state_display,
@@ -283,6 +315,7 @@ class StatusTab(QWidget):
                 f"{now - v.last_seen:.1f} s",
                 proc_uptime,
                 os_uptime,
+                svc_uptime,
                 peers,
             ]
 
@@ -310,4 +343,10 @@ class StatusTab(QWidget):
                     item.setForeground(row_color)
                     item.setFont(self._cell_font)
 
-        self.table.resizeColumnsToContents()
+        # resizeColumnsToContents() would override column 1's fixed width
+        # (set above) right back to content-based sizing on every refresh --
+        # it resizes regardless of the header's section resize mode. Resize
+        # every other column individually instead, leaving State alone.
+        for col in range(self.table.columnCount()):
+            if col != 1:
+                self.table.resizeColumnToContents(col)

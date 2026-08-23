@@ -5,10 +5,11 @@ settings change.
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtWidgets import QMainWindow, QStatusBar, QTabWidget
 
 from ..core.diag_client import DiagClient, DiagTelegram
@@ -48,6 +49,23 @@ class MainWindow(QMainWindow):
         # Bus translates thread callbacks to Qt signals
         self.bus = Bus()
 
+        # High-frequency op-frame arrivals (one per UDP packet, from the
+        # OperationalListener's own rx thread) used to fire one queued
+        # cross-thread Qt signal EACH -- at small cycle_ms with several
+        # nodes that's hundreds to thousands of signals/sec, which floods
+        # the GUI event loop and makes the whole window feel like it's
+        # hanging (it's not frozen, just perpetually working through a
+        # backlog of individual frame-arrival events). Instead: _on_op_frame
+        # appends to this plain list under a lock (cheap, off the GUI
+        # thread), and a GUI-thread timer drains + emits it as ONE signal
+        # every ~33ms (~30Hz, imperceptible) via op_frame_batch.
+        self._op_frame_queue: list[tuple[DecodedFrame, float]] = []
+        self._op_frame_queue_lock = threading.Lock()
+        self._op_frame_flush_timer = QTimer(self)
+        self._op_frame_flush_timer.setInterval(33)
+        self._op_frame_flush_timer.timeout.connect(self._flush_op_frame_queue)
+        self._op_frame_flush_timer.start()
+
         # Tabs
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -83,7 +101,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.settings_tab, "Settings")
 
         # Wire the Bus into the tabs
-        self.bus.op_frame.connect(self.logging_tab.on_op_frame)
+        self.bus.op_frame_batch.connect(self.logging_tab.on_op_frame_batch)
         self.bus.diag_telegram.connect(self.logging_tab.on_diag_telegram)
 
         # Bring up the listeners
@@ -157,8 +175,20 @@ class MainWindow(QMainWindow):
         # Session log (internally thread-safe)
         if self.session_logger.is_active():
             self.session_logger.log_operational(frame, ts_mono)
-        # Emit through the Bus (queued to the UI thread)
-        self.bus.op_frame.emit(frame, ts_mono)
+        # Queue for the batched Qt signal -- see _flush_op_frame_queue.
+        with self._op_frame_queue_lock:
+            self._op_frame_queue.append((frame, ts_mono))
+
+    def _flush_op_frame_queue(self) -> None:
+        """Runs on the GUI thread every 33ms (see __init__). Drains the
+        queue _on_op_frame fills from the rx thread and emits it as ONE
+        Qt signal instead of one per frame."""
+        with self._op_frame_queue_lock:
+            if not self._op_frame_queue:
+                return
+            batch = self._op_frame_queue
+            self._op_frame_queue = []
+        self.bus.op_frame_batch.emit(batch)
 
     def _on_diag(self, tel: DiagTelegram) -> None:
         # Status responses feed the registry (even if we didn't request them

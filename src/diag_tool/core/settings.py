@@ -35,8 +35,13 @@ class AppSettings:
     rust_repo_path: str = ""          # location of the Rust node repo (for cargo build)
     # Empty by default -> the Test tab falls back to <this_repo>/tests/scenarios.
     scenarios_path: str = ""
-    # Test mode
-    test_mode: str = "simulated"      # "simulated" | "hardware"
+    # Test mode override for the Test tab and Timing tab, both of which
+    # otherwise DERIVE simulated-vs-hardware automatically from whether
+    # any hardware node is configured+enabled. "auto" keeps that
+    # derivation; "simulated"/"hardware" force one or the other
+    # regardless of what's configured -- e.g. running a quick simulated
+    # check without disabling all your hardware nodes first.
+    test_mode: str = "auto"           # "auto" | "simulated" | "hardware"
     # Cross-compile
     target_triple: str = ""           # empty = host triple
     binary_name: str = "node"
