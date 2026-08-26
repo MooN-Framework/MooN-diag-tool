@@ -1,11 +1,11 @@
 """
-T9 — Doppelausfall gleichzeitig in 2oo4.
+T9 — Simultaneous double failure in 2oo4.
 
-Setup:     4 Nodes stabil (fabric_4).
-Injection: shutdown von 2 Nodes hintereinander (praktisch
-           zeitgleich fuer das System).
-Erwartet:  Beide werden excluded. Zwei verbleibende Nodes laufen mit
-           reduziertem Quorum weiter (nominal=4, minimum=2 → OK).
+Setup:     4 stable nodes (fabric_4).
+Injection: shutdown of 2 nodes in quick succession (effectively
+           simultaneous from the system's point of view).
+Expected:  Both are excluded. The two remaining nodes keep running
+           with a reduced quorum (nominal=4, minimum=2 → OK).
 """
 from harness.assertions import (
     wait_cycles_advance,
@@ -17,13 +17,13 @@ TARGETS = [2, 3]
 
 
 def test_double_fault_2oo4(fabric_4):
-    # Beide Shutdowns hintereinander schicken.
+    # Send both shutdowns back to back.
     for t in TARGETS:
-        assert fabric_4.diag.shutdown(t), f"shutdown fuer node {t} nicht bestaetigt"
+        assert fabric_4.diag.shutdown(t), f"shutdown for node {t} not acknowledged"
 
     for t in TARGETS:
         assert wait_node_died(fabric_4, t, timeout=5.0), (
-            f"node {t} nicht beendet"
+            f"node {t} did not exit"
         )
 
     survivors = [nid for nid in fabric_4.nodes if nid not in TARGETS]
@@ -31,8 +31,8 @@ def test_double_fault_2oo4(fabric_4):
         for target in TARGETS:
             peer = wait_peer_health(fabric_4, survivor, target, "Lost", timeout=10.0)
             assert peer is not None, (
-                f"node {survivor} sieht target {target} nicht als Lost"
+                f"node {survivor} does not see target {target} as Lost"
             )
 
-    # Zwei Nodes muessen weiter laufen.
+    # The two remaining nodes must keep running.
     assert wait_cycles_advance(fabric_4, survivors[0], n_cycles=5, timeout=8.0)

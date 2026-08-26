@@ -1,19 +1,20 @@
 """
-T10 — Split-Sichten (asymmetrische Beobachtung).
+T10 — Split views (asymmetric observation).
 
-Setup:     3 Nodes stabil.
-Injection: Node 2 verwirft alle eingehenden Frames von Node 0
-           (`InjectDropFromPeer` mit Maske 0b0000_0001).
-Erwartet:  Nodes 0 und 1 erkennen Node 2 als abweichend und schliessen
-           ihn per EM-Konsens aus (`peer excluded peer_id=2`).
+Setup:     3 stable nodes.
+Injection: Node 2 discards all incoming frames from node 0
+           (`InjectDropFromPeer` with mask 0b0000_0001).
+Expected:  Nodes 0 and 1 detect node 2 as deviating and exclude it
+           via EM consensus (`peer excluded peer_id=2`).
 
-Nachlauf per Framework-Design (kein Bug, per Safety-Case gewollt):
-    Der aus 0/1's Sicht ausgeschlossene Node 2 verliert Quorum und
-    geht in Failsafe. Der resultierende GoFailsafe-Broadcast zieht
-    0 und 1 nach — Fail-Stop ist bei SIL 2 die konservative
-    Semantik. Das Zeitfenster zwischen Lost-Markierung und
-    systemweiter Failsafe liegt bei ~50 ms, deshalb log-basierte
-    Verifikation statt Status-Polling.
+Follow-on effect by framework design (not a bug, intended by the
+safety case):
+    Node 2, excluded from 0/1's point of view, loses quorum and goes
+    into failsafe. The resulting GoFailsafe broadcast pulls 0 and 1
+    down with it -- fail-stop is the conservative semantics this
+    framework uses. The time window between the Lost marking and the
+    system-wide failsafe is around ~50 ms, so we verify via logs
+    rather than status polling.
 """
 TARGET = 2
 BLOCKED_PEER = 0
@@ -23,13 +24,13 @@ EXCLUSION_TIMEOUT_S = 8.0
 def test_split_views(fabric_3):
     peers_mask = 1 << BLOCKED_PEER
     resp = fabric_3.diag.drop_from_peer(TARGET, peers_mask)
-    assert resp is not None, "drop_from_peer injection nicht staged"
+    assert resp is not None, "drop_from_peer injection not staged"
 
     for observer in (0, 1):
         observer_node = fabric_3.nodes[observer]
         assert observer_node.wait_for_log(
             rf"peer excluded peer_id={TARGET}", timeout=EXCLUSION_TIMEOUT_S
         ), (
-            f"observer {observer} hat Node {TARGET} nicht ausgeschlossen "
-            f"innerhalb {EXCLUSION_TIMEOUT_S}s"
+            f"observer {observer} did not exclude node {TARGET} "
+            f"within {EXCLUSION_TIMEOUT_S}s"
         )

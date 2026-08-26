@@ -894,9 +894,22 @@ class TestTab(QWidget):
         self.output.setTextCursor(c)
 
     def _show_patch(self) -> None:
+        # The hardware-mode writeup lives in README.md's "Hardware mode
+        # internals" section (folded in from a former standalone doc
+        # file) -- extract just that section rather than dumping the
+        # whole README into a popup.
         pkg_dir = Path(__file__).resolve().parent.parent.parent.parent
-        doc = pkg_dir / "docs" / "harness_hardware.md"
-        text = doc.read_text() if doc.exists() else "docs/harness_hardware.md not found."
+        readme = pkg_dir / "README.md"
+        text = "README.md not found."
+        if readme.exists():
+            full = readme.read_text()
+            marker = "## Hardware mode internals"
+            start = full.find(marker)
+            if start != -1:
+                end = full.find("\n## ", start + len(marker))
+                text = full[start:end if end != -1 else None].strip()
+            else:
+                text = full
         dlg = QMessageBox(self)
         dlg.setWindowTitle("Hardware mode: how it works")
         dlg.setTextFormat(Qt.MarkdownText)

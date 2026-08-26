@@ -1,19 +1,19 @@
 """
-T14 — Stale Frames durch Clock Drift.
+T14 — Stale frames from clock drift.
 
-Vollstaendiger Test: `resync_interval_cycles` sehr hoch setzen, viele
-Minuten laufen lassen, sehen ob Frames als stale verworfen werden. Zu
-langsam fuer routinemaessige CI-Laeufe.
+Full test: set `resync_interval_cycles` very high, run for many
+minutes, check whether frames get discarded as stale. Too slow for
+routine CI runs.
 
-Approximation: `stale_frame_threshold_ms` extrem klein setzen (~1 ms).
-Dann werden auch minimal verzoegerte Frames als stale verworfen — das
-mimt effektiv den Endzustand des Drift-Szenarios.
+Approximation: set `stale_frame_threshold_ms` extremely low (~1 ms).
+Then even minimally delayed frames get discarded as stale -- this
+effectively mimics the end state of the drift scenario.
 
-Als slow markiert damit CI es per default ueberspringt.
+Marked as slow so CI skips it by default.
 """
 import pytest
 
 pytestmark = pytest.mark.skip(
-    reason="Braucht dedizierte Rust-Injection fuer Frame-Delay — "
-           "tight-threshold-Trick auf loopback nicht zuverlaessig"
+    reason="Needs a dedicated Rust injection for frame delay -- "
+           "the tight-threshold trick isn't reliable on loopback"
 )

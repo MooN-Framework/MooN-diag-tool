@@ -1,20 +1,21 @@
 """
-T18 - Sink Safety Failsafe.
+T18 — Sink safety failsafe.
 
-Setup:     3 Nodes stabil.
-Injection: broadcast_input mit einem Wert der garantiert
-           emergency_brake=true erzwingt (current_speed hoch,
-           available_distance klein).
-Erwartet:  Alle drei Nodes berechnen im Konsens emergency=true.
-           Sink.evaluate returned Failsafe. Publisher published die
-           Notbrems-Decision noch, alle drei Nodes gehen dann in
-           Failsafe (via SinkSafetyViolation).
+Setup:     3 stable nodes.
+Injection: broadcast_input with a value that guarantees
+           emergency_brake=true (high current_speed, small
+           available_distance).
+Expected:  All three nodes reach consensus on emergency=true.
+           Sink.evaluate returns Failsafe. The publisher still
+           publishes the emergency-brake decision, then all three
+           nodes go into failsafe (via SinkSafetyViolation).
 """
 from harness.assertions import wait_node_died
 
-# 200 m/s aus dem Stand mit 20 m Restweg: total_distance ist so gross
-# dass emergency_brake ganz sicher gesetzt wird — quer durch die ganze
-# Deceleration-Tabelle nicht bremsbar.
+# 200 m/s from a standstill with 20 m of remaining distance: the
+# total distance required is so large that emergency_brake is
+# guaranteed to be set -- unbrakeable across the entire deceleration
+# table.
 UNSAFE_INPUT = {
     "current_speed": 200.0,
     "target_speed": 0.0,
@@ -25,16 +26,16 @@ UNSAFE_INPUT = {
 def test_sink_safety_failsafe(fabric_3):
     fabric_3.diag.broadcast_input(UNSAFE_INPUT)
 
-    # Alle drei Nodes muessen Failsafe erreichen (Process Exit).
+    # All three nodes must reach failsafe (process exit).
     for nid in fabric_3.nodes:
         assert wait_node_died(fabric_3, nid, timeout=10.0), (
-            f"node {nid} sollte durch SinkSafetyViolation in Failsafe gehen"
+            f"node {nid} should go to failsafe via SinkSafetyViolation"
         )
 
-    # Mindestens ein Node muss die Sink-Ablehnung geloggt haben.
+    # At least one node must have logged the sink rejection.
     found = False
     for node in fabric_3.nodes.values():
         if node.wait_for_log(r"sink rejected decision as unsafe", timeout=1.0):
             found = True
             break
-    assert found, "kein Node hat die Sink-Ablehnung geloggt"
+    assert found, "no node logged the sink rejection"

@@ -1,17 +1,17 @@
 """
-Ein einzelner Node-Prozess plus Log-Watcher.
+A single node process plus a log watcher.
 
 Design:
-- Popen mit stdout=PIPE, stderr=STDOUT (kombiniert).
-- Reader-Thread schiebt jede Zeile in einen thread-safe deque.
+- Popen with stdout=PIPE, stderr=STDOUT (combined).
+- A reader thread pushes every line into a thread-safe deque.
 - API:
     node.start()
     node.wait_for_log(pattern, timeout=5.0) -> Match | None
-    node.stop(timeout=2.0)         # SIGTERM, dann SIGKILL
-    node.exit_code                 # nur nach stop() gueltig
-    node.log_lines                 # list[str] aller bisher gesehenen Zeilen
-- Der Log-Watcher speichert alle Zeilen, damit ein Test spaeter auch
-  auf ein Pattern matchen kann das schon vorbei ist.
+    node.stop(timeout=2.0)         # SIGTERM, then SIGKILL
+    node.exit_code                 # only valid after stop()
+    node.log_lines                 # list[str] of all lines seen so far
+- The log watcher stores every line, so a test can later match a
+  pattern for an event that already happened.
 """
 from __future__ import annotations
 
@@ -34,6 +34,7 @@ class Node:
     config_path: Path
     log_dir: Path
     rust_log: str = "info"
+    extra_env: dict = field(default_factory=dict)
 
     _proc: Optional[subprocess.Popen] = field(default=None, init=False, repr=False)
     _reader_thread: Optional[threading.Thread] = field(default=None, init=False, repr=False)
@@ -45,8 +46,13 @@ class Node:
     def start(self) -> None:
         env = os.environ.copy()
         env["RUST_LOG"] = self.rust_log
-        # tracing schreibt farbig auf stdout wenn TTY. Wir wollen plaintext.
+        # tracing writes colored output to stdout when attached to a
+        # TTY. We want plain text.
         env["NO_COLOR"] = "1"
+        # Extra env vars (e.g. MOON_INJECT_SELFTEST_FAIL for T17) get
+        # merged in here. Deliberately overriding, not merging -- if a
+        # test set this explicitly, that's intentional.
+        env.update(self.extra_env)
 
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -81,14 +87,14 @@ class Node:
 
     def wait_for_log(self, pattern: str | Pattern, timeout: float = 5.0) -> Optional[re.Match]:
         """
-        Warte bis eine Log-Zeile das Pattern matched, oder timeout.
-        Prueft auch alle bereits gesehenen Zeilen — damit ein Test nicht
-        an einer Race-Condition scheitert wenn die Zeile schon durch ist.
+        Waits until a log line matches the pattern, or times out.
+        Also checks all lines already seen -- so a test can't lose a
+        race against a line that already went by.
         """
         pat = re.compile(pattern) if isinstance(pattern, str) else pattern
         deadline = time.monotonic() + timeout
 
-        # Zuerst: bestehende Zeilen scannen.
+        # First: scan existing lines.
         with self._lines_lock:
             existing = list(self._lines)
         for ln in existing:
@@ -96,7 +102,7 @@ class Node:
             if m:
                 return m
 
-        # Dann: warten auf neue Zeilen bis timeout.
+        # Then: wait for new lines until timeout.
         seen_count = len(existing)
         while time.monotonic() < deadline:
             self._new_line_event.wait(timeout=0.1)

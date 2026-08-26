@@ -1,12 +1,12 @@
 """
-Diagnostic-Multicast-Client fuer den Test-Harness.
+Diagnostic multicast client for the test harness.
 
-Klein und synchron gehalten: fuer jede Injection sendet der Client das
-Telegramm, sammelt Antworten fuer ein kurzes Fenster, gibt sie als Liste
-zurueck. Fuer GetStatus wird das Status-JSON pro Node zurueckgegeben.
+Kept small and synchronous: for every injection the client sends the
+telegram, collects responses for a short window, and returns them as
+a list. For GetStatus it returns the per-node status JSON.
 
-Getrennt von diag_test.py weil das ein CLI-Tool ist und wir hier eine
-programmatische API brauchen.
+Kept separate from diag_test.py, which is a CLI tool -- this module
+provides the programmatic API used by the harness and the GUI.
 """
 from __future__ import annotations
 
@@ -36,9 +36,27 @@ KNOWN_INJECTION_CMDS: frozenset[str] = frozenset({
     # Meta
     "clear_injection",
     "inject_corrupt_result",
-    "inject_drop_from_peer",       # NEU (T10)
-    "inject_fake_phase_header",    # NEU (T16)
+    "inject_drop_from_peer",       # T10
+    "inject_fake_phase_header",    # T16
+    "inject_input_provider_fail",  # T23
+    "inject_computation_fail",     # T24
 })
+
+# Symbolic names for FailsafeReason wire values (matches
+# framework/wire/frame.rs). Used by test-side assertions that check
+# StatusResponse.last_failsafe_reason.
+FAILSAFE_REASON = {
+    "Unspecified":         0x00,
+    "QuorumLost":          0x01,
+    "StateDivergence":     0x02,
+    "SelfTestFailed":      0x03,
+    "SinkSafetyViolation": 0x04,
+    "LocalFault":          0x05,
+    "PeerBroadcast":       0x06,
+    # 0x07-0x0A were reserved for DiscoveryError, TransportError,
+    # InputProviderFailed, NoActivePeers in the extended diag build
+    # but are not present in this framework build.
+}
  
 NODE_STATE_WIRE = {
     "Startup":                 0x01,
@@ -104,7 +122,7 @@ class DiagClient:
         self._sock.sendto(json.dumps(telegram).encode(), (self.group, self.port))
 
     def _drain(self, duration: float = 0.2) -> list[dict]:
-        """Alle Antworten fuer duration Sekunden einsammeln."""
+        """Collect all responses for `duration` seconds."""
         deadline = time.monotonic() + duration
         out = []
         while time.monotonic() < deadline:
@@ -120,7 +138,7 @@ class DiagClient:
                 parsed = json.loads(data)
             except json.JSONDecodeError:
                 continue
-            # Loopback (unsere eigenen Sends) rausfiltern.
+            # Filter out our own loopback sends.
             if parsed.get("type") in ("command", "input"):
                 continue
             out.append(parsed)
@@ -135,15 +153,15 @@ class DiagClient:
         ack_timeout: float = 3.0,
     ) -> bool:
         """
-        Aktiviert fake_crc auf MEHREREN Nodes gleichzeitig, in einem
-        einzigen Broadcast-Telegramm. Damit sind alle Nodes im gleichen
-        Zyklus scharf, statt sequentiell mit Latenz zwischen den RPCs.
-        Wichtig fuer Byzantine-Splittests (T20), wo zwei Nodes ihre
-        fake CRC im selben Zyklus senden muessen, um den 2/2-Split zu
-        triggern.
-    
-        Wartet auf Staged-Acks von ALLEN targets, wiederholt das
-        Telegramm periodisch (loopback verliert manchmal Pakete).
+        Arms fake_crc on MULTIPLE nodes at once, in a single broadcast
+        telegram. This makes all nodes go live in the same cycle,
+        instead of sequentially with latency between the individual
+        RPCs. Important for the Byzantine split tests (T19), where two
+        nodes must send their fake CRC in the same cycle to trigger
+        the 2/2 split.
+
+        Waits for staged acks from ALL targets, retransmitting the
+        telegram periodically (loopback occasionally drops packets).
         """
         telegram = {
             "type": "command",
@@ -177,18 +195,18 @@ class DiagClient:
         **kwargs,
     ) -> Optional[dict]:
         """
-        Sendet ein gerichtetes Command und wartet auf das Staged-Ack.
-        Wir senden ein paar Mal weil Multicast auf loopback rare packet
-        loss haben kann.
+        Sends a directed command and waits for the staged ack. We
+        retransmit a few times because multicast on loopback can have
+        rare packet loss.
         """
         if cmd not in KNOWN_INJECTION_CMDS:
-            # Fail fast statt still None zurueckzugeben. Ein unbekannter
-            # cmd bedeutet fast immer einen Tippfehler oder eine nicht
-            # existente Injection-Variante — dann sollen wir hier sofort
-            # abbrechen und nicht Minuten spaeter im Test-Timeout landen.
+            # Fail fast instead of silently returning None. An unknown
+            # cmd almost always means a typo or a non-existent
+            # injection variant -- better to abort here immediately
+            # than to end up in a test timeout minutes later.
             raise KeyError(
-                f"unbekanntes Injection-Command '{cmd}'. "
-                f"Bekannte Commands: {sorted(KNOWN_INJECTION_CMDS)}"
+                f"unknown injection command '{cmd}'. "
+                f"Known commands: {sorted(KNOWN_INJECTION_CMDS)}"
             )
     
         telegram = {
@@ -211,24 +229,24 @@ class DiagClient:
 
     def drop_from_peer(self, node_id: int, peers_mask: int):
         """
-        T10 — Weist `node_id` an, alle eingehenden Frames zu verwerfen,
-        deren Absender-Node-ID im `peers_mask` gesetzt ist (Bit N = Node N).
-        Persistent bis ClearInjection.
+        T10 — Tells `node_id` to discard all incoming frames whose
+        sender node ID is set in `peers_mask` (bit N = node N).
+        Persistent until ClearInjection.
 
-        Beispiel: `drop_from_peer(2, 0b0000_0001)` laesst Node 2 alle Frames
-        von Node 0 verwerfen.
+        Example: `drop_from_peer(2, 0b0000_0001)` makes node 2 discard
+        all frames from node 0.
         """
         return self._inject(node_id, "inject_drop_from_peer", peers_mask=peers_mask)
 
 
     def fake_phase_header(self, node_id: int, count: int, wire_value: int):
         """
-        T16 — Weist `node_id` an, die naechsten `count` ausgehenden Frames
-        mit einem gefaelschten node_state_wire-Byte zu senden. `wire_value`
-        muss zu einer gueltigen NodeState-Variante decodieren; sonst
-        faellt der Runner auf den echten State zurueck und loggt.
+        T16 — Tells `node_id` to send the next `count` outgoing frames
+        with a forged node_state_wire byte. `wire_value` must decode
+        to a valid NodeState variant; otherwise the runner falls back
+        to the real state and logs it.
 
-        Verwende die NODE_STATE_WIRE-Konstante fuer symbolische Werte:
+        Use the NODE_STATE_WIRE constant for symbolic values:
             fake_phase_header(2, count=5, wire_value=NODE_STATE_WIRE["Isolation"])
         """
         return self._inject(
@@ -265,7 +283,25 @@ class DiagClient:
 
     def corrupt_result(self, node_id: int, count: int) -> Optional[dict]:
         return self._inject(node_id, "inject_corrupt_result", count=count)
-    
+
+    def input_provider_fail(self, node_id: int) -> Optional[dict]:
+        """
+        T23 — One-shot. Tells `node_id` to skip the
+        `record_own_input` call in the next `handle_read_inputs`.
+        Effect: the following ShareInputs finds no own input latch →
+        `LocalFault` failsafe. Self-clearing after one cycle.
+        """
+        return self._inject(node_id, "inject_input_provider_fail")
+
+    def computation_fail(self, node_id: int) -> Optional[dict]:
+        """
+        T24 — One-shot. Tells `node_id` to abort the compute step in
+        the next `handle_share_inputs` immediately with a fault,
+        without calling the real `Computation::compute`. Effect:
+        `LocalFault` failsafe. Self-clearing after one cycle.
+        """
+        return self._inject(node_id, "inject_computation_fail")
+
     # Whole-node
     def shutdown(self, node_id: int) -> Optional[dict]:
         return self._inject(node_id, "inject_shutdown")
@@ -285,14 +321,14 @@ class DiagClient:
     # Silent = drop_results + drop_acks
     def silent(self, node_id: int, count: int, ack_timeout: float = 3.0) -> bool:
         """
-        Beide Kommandos hintereinander senden, dann auf beide Acks
-        gleichzeitig warten. Wichtig: erst BEIDE senden, dann warten —
-        sonst kann der Node zwischen den zwei Sends bereits Wirkung
-        entfalten und das zweite Kommando verpassen.
+        Sends both commands back to back, then waits for both acks
+        together. Important: send BOTH first, then wait -- otherwise
+        the node could already take effect between the two sends and
+        miss the second command.
 
-        Multicast auf loopback verliert manchmal einzelne Pakete, wir
-        wiederholen deshalb periodisch beide Kommandos zusammen bis
-        BEIDE Acks eingetroffen sind.
+        Multicast on loopback occasionally drops individual packets,
+        so we periodically retransmit both commands together until
+        BOTH acks have arrived.
         """
         needed = {"inject_drop_results", "inject_drop_acks"}
         received: set[str] = set()
@@ -333,8 +369,9 @@ class DiagClient:
 
     def get_status(self, node_id: int, timeout: float = 2.0) -> Optional[dict]:
         """
-        Status eines Nodes abfragen. Sendet get_status bis eine Antwort
-        kommt oder timeout. Gibt das `data`-Objekt zurueck (StatusResponse).
+        Query a node's status. Sends get_status until a response
+        arrives or the timeout expires. Returns the `data` object
+        (StatusResponse).
         """
         telegram = {
             "type": "command",

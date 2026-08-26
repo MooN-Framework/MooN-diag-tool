@@ -1,12 +1,12 @@
 """
-Assertion-Helper fuer die Testszenarien.
+Assertion helpers for the test scenarios.
 
-Erfolg pruefen wir zweigleisig:
-1. Status via GetStatus (primaer, strukturiert).
-2. Log-Pattern-Matching (Fallback, sobald Node in Failsafe ist).
+We check success two ways:
+1. Status via GetStatus (primary, structured).
+2. Log-pattern matching (fallback, once a node has entered failsafe).
 
-Beide sind hier in Wait-Funktionen gepackt weil das System asynchron ist —
-wir wissen nicht genau wann eine Injection wirkt.
+Both are wrapped in wait-functions because the system is asynchronous
+-- we can't know exactly when an injection takes effect.
 """
 from __future__ import annotations
 
@@ -24,11 +24,11 @@ def wait_peer_health(
     timeout: float = 5.0,
 ) -> Optional[dict]:
     """
-    Wartet bis Node `observer_id` den Peer `target_peer_id` mit
-    `expected_health` sieht. `expected_health` ist "Alive", "Lost",
-    "Probation", etc. — String wie er in StatusResponse.peers steht.
+    Waits until node `observer_id` reports peer `target_peer_id` with
+    `expected_health`. `expected_health` is "Alive", "Lost",
+    "Probation", etc. -- the string as it appears in StatusResponse.peers.
 
-    Returns die peer-dict wenn matched, None wenn timeout.
+    Returns the peer dict on match, None on timeout.
     """
     assert fabric.diag
     deadline = time.monotonic() + timeout
@@ -48,7 +48,7 @@ def wait_node_state(
     expected_state: str,
     timeout: float = 5.0,
 ) -> Optional[dict]:
-    """Wartet bis ein Node in einem bestimmten NodeState laeuft."""
+    """Waits until a node is running in a specific NodeState."""
     assert fabric.diag
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -61,17 +61,16 @@ def wait_node_state(
 
 def wait_node_died(fabric: Fabric, node_id: int, timeout: float = 5.0) -> bool:
     """
-    Wartet bis ein Node nicht mehr antwortet.
+    Waits until a node stops responding.
 
-    Ueber GetStatus auf fabric.diag statt Node.is_running() (Prozess-
-    Poll): liefert der Node dort nicht mehr innerhalb des Timeouts,
-    gilt er als tot. Das funktioniert identisch fuer simulierte UND
-    Hardware-Nodes (harness.hw_node.RemoteNode.is_running() macht
-    zwar inzwischen auch einen echten SSH-Liveness-Check moeglich,
-    aber GetStatus bleibt hier bewusst die Quelle der Wahrheit -- der
-    eigentlich interessierende Zustand ist "reagiert nicht mehr im
-    laufenden System", nicht "Betriebssystem-Prozess existiert nicht
-    mehr").
+    Uses GetStatus on fabric.diag rather than Node.is_running()
+    (a process poll): if the node doesn't answer within the timeout,
+    it's considered dead. This works identically for simulated AND
+    hardware nodes (harness.hw_node.RemoteNode.is_running() does now
+    also offer a real SSH liveness check, but GetStatus is
+    deliberately kept as the source of truth here -- the state we
+    actually care about is "no longer responding within the running
+    system", not "the OS process no longer exists").
     """
     assert fabric.diag
     deadline = time.monotonic() + timeout
@@ -89,9 +88,9 @@ def wait_cycles_advance(
     timeout: float = 10.0,
 ) -> bool:
     """
-    Wartet bis `current_seq` des Nodes um mindestens n_cycles gewachsen ist.
-    Nuetzlich um sicher zu stellen dass die Fabric nach einer Injection
-    weiter laeuft (nicht in Failsafe hing).
+    Waits until the node's `current_seq` has grown by at least
+    n_cycles. Useful for confirming that the fabric keeps running
+    after an injection (i.e. it didn't hang in failsafe).
     """
     assert fabric.diag
     initial = fabric.diag.get_status(node_id, timeout=2.0)
@@ -110,8 +109,8 @@ def wait_cycles_advance(
 
 def any_node_reached_failsafe(fabric: Fabric, timeout: float = 5.0) -> Optional[int]:
     """
-    Prueft ob irgendein Node in Failsafe gegangen ist (via Log-Pattern).
-    Returns die node_id des ersten der Failsafe erreicht hat, oder None.
+    Checks whether any node has entered failsafe (via log pattern).
+    Returns the node_id of the first node to reach failsafe, or None.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -124,8 +123,9 @@ def any_node_reached_failsafe(fabric: Fabric, timeout: float = 5.0) -> Optional[
 
 def assert_exclusion_confirmed(fabric: Fabric, target_peer_id: int) -> None:
     """
-    Harte Assertion: mindestens ein Node hat 'peer excluded peer_id=X'
-    geloggt. Nutze `wait_peer_health` fuer die weiche Version.
+    Hard assertion: at least one node has logged
+    'peer excluded peer_id=X'. Use `wait_peer_health` for the soft
+    version.
     """
     pat = rf"peer excluded peer_id={target_peer_id}"
     found = False
@@ -134,3 +134,75 @@ def assert_exclusion_confirmed(fabric: Fabric, target_peer_id: int) -> None:
             found = True
             break
     assert found, f"no node logged exclusion of peer {target_peer_id}"
+
+
+def wait_last_failsafe_reason(
+    fabric: Fabric,
+    node_id: int,
+    expected_reason: int,
+    timeout: float = 8.0,
+) -> bool:
+    """
+    Waits until the node's `StatusResponse.last_failsafe_reason`
+    reports the expected `expected_reason` (the u8 value of the
+    FailsafeReason enum from the Rust framework). Use the
+    `FAILSAFE_REASON` constant from `harness.diag` for symbolic names.
+
+    Important: once a node enters failsafe, the process exits. It
+    then no longer answers get_status -- so we poll aggressively
+    (100ms interval, short get_status timeout) to reliably catch the
+    window between mark_failsafe and process exit.
+
+    Returns True on match, False on timeout or if the node dies
+    before a response with the reason set arrives.
+    """
+    assert fabric.diag
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = fabric.diag.get_status(node_id, timeout=0.15)
+        if status is not None:
+            reason = status.get("last_failsafe_reason")
+            if reason == expected_reason:
+                return True
+        # No sleep -- on a fast collapse we need to fit as many poll
+        # attempts as possible between mark_failsafe and process exit.
+    return False
+
+
+def assert_transition_sequence_present(
+    fabric: Fabric,
+    node_id: int,
+    needle: list[tuple[str, str, str]],
+    timeout: float = 5.0,
+) -> bool:
+    """
+    Checks whether the node's `recent_transitions` ring buffer
+    contains the given subsequence (each entry = `(from, event, to)`)
+    in exactly this order. Not necessarily contiguous -- only that
+    the entries occur in this order. Useful for verifying "did the
+    node go through the expected FSM path".
+
+    Polls aggressively until match or timeout. Returns True on match,
+    False otherwise.
+    """
+    assert fabric.diag
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = fabric.diag.get_status(node_id, timeout=0.15)
+        if status is not None:
+            transitions = [
+                (t["from"], t["event"], t["to"])
+                for t in status.get("recent_transitions", [])
+            ]
+            # Subsequence match: walk needle, for each entry look for
+            # the next matching position in transitions.
+            idx = 0
+            for entry in transitions:
+                if idx >= len(needle):
+                    break
+                if entry == needle[idx]:
+                    idx += 1
+            if idx == len(needle):
+                return True
+        # No sleep -- poll aggressively.
+    return False

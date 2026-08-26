@@ -37,7 +37,7 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
         self.setStatusBar(QStatusBar())
 
-        self.qsettings = QSettings("2oo3-framework", "diag-tool")
+        self.qsettings = QSettings("MooN-framework", "diag-tool")
         self.settings: AppSettings = load_from_qsettings(self.qsettings)
 
         # Core objects (no Qt dependency)

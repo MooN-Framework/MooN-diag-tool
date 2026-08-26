@@ -1,17 +1,17 @@
 """
-T5 — Input Divergence.
+T5 — Input divergence.
 
-Setup:     3 Nodes stabil, alle mit gleichem Input.
-Injection: set-input-single <target> mit stark abweichendem Wert.
-Erwartet:  Target verwendet abweichenden Input. In ShareInputs feuert
-           `computation.inputs_agree` und returnt InputsDivergent.
-           Alle drei Nodes gehen in EM, target wird als Divergent
-           identifiziert und excluded.
+Setup:     3 stable nodes, all with the same input.
+Injection: set-input-single <target> with a strongly deviating value.
+Expected:  The target uses the deviating input. In ShareInputs,
+           `computation.inputs_agree` fires and returns
+           InputsDivergent. All three nodes enter EM, the target is
+           identified as divergent and excluded.
 
-Anmerkung: welcher Wert "stark abweichend" ist, haengt von
-`Computation::inputs_agree`. Fuer die ETCS-Bremskurve pruefen die
-inputs_agree typischerweise Toleranzen auf current_speed, target_speed,
-available_distance. Ein Wert weit ausserhalb sollte divergieren.
+Note: what counts as "strongly deviating" depends on
+`Computation::inputs_agree`. For the ETCS brake curve, inputs_agree
+typically checks tolerances on current_speed, target_speed, and
+available_distance. A value far outside those bounds should diverge.
 """
 from harness.assertions import wait_cycles_advance, wait_peer_health
 
@@ -26,7 +26,7 @@ DIVERGENT_INPUT = {
 
 def test_input_divergence(fabric_3):
     ack = fabric_3.diag.targeted_input(TARGET, DIVERGENT_INPUT)
-    assert ack, "targeted input nicht bestaetigt"
+    assert ack, "targeted input not acknowledged"
 
     survivors = [nid for nid in fabric_3.nodes if nid != TARGET]
     for survivor in survivors:

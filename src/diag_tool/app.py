@@ -12,7 +12,7 @@ from .ui import style
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("MooN framework diagnostic tool")
-    app.setOrganizationName("2oo3-framework")
+    app.setOrganizationName("MooN-framework")
     style.apply(app)
     w = MainWindow()
     w.show()

@@ -1,12 +1,12 @@
 """
-T6 — Result Divergence.
+T6 — Result divergence.
 
-Setup:     3 Nodes stabil.
-Injection: Node 2 sendet fuer count Cycles einen manipulierten
-           BrakeResult (grosse Distanzverschiebung + Emergency-Flip).
-Erwartet:  Nodes 0 und 1 einigen sich auf ihren gemeinsamen Wert,
-           erkennen Node 2 via find_dissenters, proposen ihn zum
-           Ausschluss. Nach EM sehen sie ihn auf Lost.
+Setup:     3 stable nodes.
+Injection: Node 2 sends a tampered BrakeResult (large distance shift
+           + emergency flip) for `count` cycles.
+Expected:  Nodes 0 and 1 agree on their shared value, identify node 2
+           via find_dissenters, and propose it for exclusion. After
+           EM they see it as Lost.
 """
 from harness.assertions import wait_peer_health
 
@@ -19,5 +19,5 @@ def test_result_divergence(fabric_3):
     for observer in (0, 1):
         peer = wait_peer_health(fabric_3, observer, TARGET, "Lost", timeout=8.0)
         assert peer is not None, (
-            f"observer {observer} hat Node {TARGET} nicht als Lost markiert"
+            f"observer {observer} did not mark node {TARGET} as Lost"
         )

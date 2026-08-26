@@ -1,28 +1,30 @@
 """
-T22 — Langzeit-Stabilitaetstest.
+T22 — Long-run stability test.
 
-Setup:     3 Nodes stabil.
-Sequenz:
-    1. Eigene Fabric mit CYCLE_MS aufsetzen (nicht die 20ms Standard-
-       Fabric — das war fuer 30s-Runs auf ausgelasteten CI-Maschinen
-       zu ambitioniert und triggerte Phase-Timeouts + GoFailsafe-Cascade).
-    2. Warten bis alle Nodes steady-state erreicht haben.
-    3. Fuer DURATION_S Sekunden alle INSPECT_INTERVAL_S einen Snapshot
-       (get_status + is_running) von jedem Node sammeln — ohne
-       assertions dazwischen.
-    4. Am Ende Report drucken (auch bei Erfolg) und Invarianten pruefen.
+Setup:     3 stable nodes.
+Sequence:
+    1. Set up a dedicated fabric with CYCLE_MS (not the standard
+       20 ms fabric -- that was too ambitious for 30s runs on loaded
+       CI machines and triggered phase timeouts + a GoFailsafe
+       cascade).
+    2. Wait until all nodes reach steady state.
+    3. For DURATION_S seconds, collect a snapshot (get_status +
+       is_running) from every node every INSPECT_INTERVAL_S -- with
+       no assertions in between.
+    4. At the end, print a report (even on success) and check the
+       invariants.
 
-Invarianten:
-    - Kein Node stirbt.
-    - Kein Node landet dauerhaft in Failsafe/Isolation.
-    - Zyklen laufen mit MIN_CYCLE_RATE der nominalen Rate (defensiver
-      Threshold).
-    - Alle Nodes machen ungefaehr gleich viele Zyklen (spread <=
-      MAX_CYCLE_SPREAD).
+Invariants:
+    - No node dies.
+    - No node ends up stuck in Failsafe/Isolation.
+    - Cycles advance at at least MIN_CYCLE_RATE of the nominal rate
+      (a defensive threshold).
+    - All nodes complete roughly the same number of cycles
+      (spread <= MAX_CYCLE_SPREAD).
 
-Bei Node-Tod werden die letzten Log-Zeilen jedes Nodes in den Report
-aufgenommen — damit sofort erkennbar ist WELCHER Node zuerst gestorben
-ist und mit welcher `FailsafeReason` (bzw. Panic oder ohne Grund).
+If a node dies, the last log lines of every node are included in the
+report -- so it's immediately clear WHICH node died first and with
+which `FailsafeReason` (or panic, or none at all).
 """
 from __future__ import annotations
 
@@ -37,7 +39,8 @@ from harness.fabric import Fabric, FabricOptions
 from harness.config_gen import scaled_timing
 
 
-CYCLE_MS = 50          # generoeser als Standard-Fabric — Langzeitstabilitaet != Timing-Grenztest
+CYCLE_MS = 50          # more generous than the standard fabric -- long-run
+                       # stability isn't a timing-limit test
 NOMINAL = 3
 MINIMUM = 2
 DURATION_S = 30.0
@@ -45,7 +48,7 @@ INSPECT_INTERVAL_S = 3.0
 MIN_CYCLE_RATE = 0.60
 MAX_CYCLE_SPREAD = 0.10
 MAX_TRANSIENT_MISSES_PER_NODE = 1
-LOG_TAIL_LINES = 30    # so viele Log-Zeilen pro Node bei Todesfall zeigen
+LOG_TAIL_LINES = 30    # log lines per node to show on a failure
 SETUP_TIMEOUT_S = 15.0
 
 
@@ -70,9 +73,9 @@ class NodeReport:
 
 def _read_log_tail(node, n_lines: int) -> list[str]:
     """
-    Beste-Absicht: liest die letzten n_lines aus dem Node-Log. Falls
-    das Log-Attribut nicht vorhanden ist (harness-Version ohne
-    log_path), leere Liste.
+    Best-effort read of the last n_lines from the node's log. Returns
+    an empty list if the log attribute isn't available (a harness
+    version without log_path).
     """
     for attr in ("log_path", "log_file", "stdout_path"):
         p = getattr(node, attr, None)
@@ -93,9 +96,9 @@ def _read_log_tail(node, n_lines: int) -> list[str]:
 @pytest.fixture
 def long_run_fabric(request, binary, work_dir):
     """
-    Eigene Fabric-Instanz mit groesserer cycle_duration_ms. Ersetzt
-    fabric_3 fuer diesen Test, damit die 20ms-Standardkonfig nicht
-    limitiert.
+    A dedicated fabric instance with a larger cycle_duration_ms.
+    Replaces fabric_3 for this test so the 20ms standard config isn't
+    the limiting factor.
     """
     if request.config.getoption("--fabric") == "hardware":
         pytest.skip("long-run stability uses simulated fabric only")
@@ -127,7 +130,7 @@ def test_long_run_stability(long_run_fabric):
     expected_per_interval = int(INSPECT_INTERVAL_S * 1000 / CYCLE_MS)
     min_per_interval = max(1, int(expected_per_interval * MIN_CYCLE_RATE))
 
-    # 1. Steady-state.
+    # 1. Steady state.
     for nid in node_ids:
         for name in ("ReadInputs", "ShareInputs", "ShareResult",
                      "PublishResult", "SendAck", "CycleSync"):
@@ -144,7 +147,7 @@ def test_long_run_stability(long_run_fabric):
         assert status is not None, f"node {nid} does not respond at start"
         baseline[nid] = status.get("current_seq", 0)
 
-    # 2. Snapshots sammeln.
+    # 2. Collect snapshots.
     snapshots: list[Snapshot] = []
     start = time.monotonic()
     deadline = start + DURATION_S
@@ -164,7 +167,7 @@ def test_long_run_stability(long_run_fabric):
             snapshots.append(Snapshot(t=t, node_id=nid, status=status,
                                       process_alive=alive))
 
-    # 3. Analyse.
+    # 3. Analysis.
     reports = {nid: NodeReport(node_id=nid) for nid in node_ids}
     last_seq: dict[int, int] = dict(baseline)
     last_t: dict[int, float] = {nid: 0.0 for nid in node_ids}
@@ -193,7 +196,7 @@ def test_long_run_stability(long_run_fabric):
     for nid in node_ids:
         reports[nid].total_cycles = last_seq[nid] - baseline[nid]
 
-    # 4. Report — immer drucken.
+    # 4. Report -- always printed.
     lines = [
         f"long-run stability report",
         f"  config:     nominal={NOMINAL}, minimum={MINIMUM}, "
@@ -220,12 +223,12 @@ def test_long_run_stability(long_run_fabric):
         for t, pid, h in r.peer_flaps[:3]:
             lines.append(f"    peer flap at {t:.1f}s: peer {pid}={h}")
 
-    # 5. Log-Tails bei Todesfaellen (auch fuer live-Nodes zur Kontext-Sicht).
+    # 5. Log tails on failures (also gives context for live nodes).
     if first_death_at is not None:
         lines.append("")
         lines.append("=" * 72)
         lines.append(
-            f"log tails (last {LOG_TAIL_LINES} lines per node) — "
+            f"log tails (last {LOG_TAIL_LINES} lines per node) -- "
             f"look for Failsafe/panic/error"
         )
         for nid in node_ids:
@@ -239,7 +242,7 @@ def test_long_run_stability(long_run_fabric):
 
     print("\n" + "\n".join(lines))
 
-    # 6. Assertions gesammelt.
+    # 6. Assertions, collected.
     failures: list[str] = []
     for nid in node_ids:
         r = reports[nid]

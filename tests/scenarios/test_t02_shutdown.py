@@ -1,10 +1,10 @@
 """
-T2 — Shutdown (harter Ausfall).
+T2 — Shutdown (hard failure).
 
-Setup:     3 Nodes stabil.
+Setup:     3 stable nodes.
 Injection: shutdown <target>.
-Erwartet:  Target-Prozess beendet sich; Peers erkennen den Ausfall und
-           excluden den target.
+Expected:  The target process exits; peers detect the failure and
+           exclude the target.
 """
 from harness.assertions import (
     wait_cycles_advance,
@@ -16,9 +16,9 @@ TARGET = 2
 
 
 def test_shutdown(fabric_3):
-    assert fabric_3.diag.shutdown(TARGET), "shutdown injection nicht bestaetigt"
+    assert fabric_3.diag.shutdown(TARGET), "shutdown injection not acknowledged"
 
-    # Der target-Prozess muss real weg sein.
+    # The target process must actually be gone.
     assert wait_node_died(fabric_3, TARGET, timeout=5.0), (
         f"node {TARGET} process not exited"
     )

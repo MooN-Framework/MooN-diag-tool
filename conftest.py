@@ -1,35 +1,35 @@
 """
-Pytest fixtures for the 2oo3 test framework.
+Pytest fixtures for the MooN test framework.
 
-Sitzt im Repo-Root, wird von pytest automatisch geladen.
+Lives at the repo root, loaded automatically by pytest.
 
-CLI-Optionen:
-  --rust-repo=PATH      Wo liegt das Rust-Node-Repo (Cargo.toml). Default:
-                        env var RUST_REPO oder ../voting-node relativ zum Repo.
-  --fabric=MODE         "simulated" (default) baut lokal via cargo und
-                        spawnt Prozesse; "hardware" verwendet reale Nodes
-                        ueber die konfigurierten Multicast-Gruppen.
-  --hw-nodes-file=PATH  Nur --fabric=hardware: Pfad zu einer JSON-Datei mit
-                        der Node-Verbindungsdaten-Liste (Schema wie
+CLI options:
+  --rust-repo=PATH      Location of the Rust node repo (Cargo.toml). Default:
+                        env var RUST_REPO, or ../voting-node relative to this repo.
+  --fabric=MODE         "simulated" (default) builds locally via cargo and
+                        spawns processes; "hardware" drives real nodes over
+                        the configured multicast groups.
+  --hw-nodes-file=PATH  Only for --fabric=hardware: path to a JSON file with
+                        the node connection list (schema:
                         diag_tool.core.ssh_deploy.HardwareNode -- host, user,
                         port, password, remote_binary/config/log/log_dir,
-                        start_cmd/stop_cmd). Der Diagnose-Tool-Test-Tab
-                        schreibt diese Datei automatisch (0600, temp) vor
-                        jedem Hardware-Lauf und raeumt sie danach auf. Ohne
-                        diese Datei ist im Hardware-Modus weder
-                        restart_node() noch Node.wait_for_log() moeglich,
-                        siehe harness/hw_node.py.
+                        start_cmd/stop_cmd). The diag tool's Test tab writes
+                        this file automatically (0600, temp) before every
+                        hardware run and cleans it up afterwards. Without
+                        this file, neither restart_node() nor
+                        Node.wait_for_log() work in hardware mode --
+                        see harness/hw_node.py.
   --diag-group / --diag-port / --op-group / --op-port / --interface-ip
-                        Multicast-Konfig fuer Hardware-Modus.
+                        Multicast configuration for hardware mode.
 
-Wichtige Fixtures:
-- `binary` (session-scope): pfad zum kompilierten Rust-Node-Binary.
-  Baut mit `cargo build --features diagnostic` beim ersten Test, danach cached.
-- `work_dir` (function-scope): temp-Verzeichnis pro Test.
-- `fabric_3` / `fabric_4` (function-scope): Fabric-Fixtures, im
-  Hardware-Modus ersetzt durch einen `--hw-nodes-file`-basierten Adapter
-  (siehe _HardwareFabric) mit echtem restart_node() und log-basierten
-  wait_for_log()-Assertions ueber das Framework's --log-dir-Filelogging.
+Key fixtures:
+- `binary` (session-scope): path to the compiled Rust node binary.
+  Built with `cargo build --features diagnostic` on first use, then cached.
+- `work_dir` (function-scope): a temp directory per test.
+- `fabric_3` / `fabric_4` (function-scope): fabric fixtures. In hardware
+  mode these are backed by a `--hw-nodes-file`-based adapter
+  (see _HardwareFabric) with a real restart_node() and log-based
+  wait_for_log() assertions over the framework's --log-dir file logging.
 """
 from __future__ import annotations
 
@@ -211,7 +211,7 @@ class _HardwareFabric:
         time.sleep(0.3)  # let the old process actually exit before rebinding its sockets
         print(f"[restart] node {node_id} ({rn.hw.host}): starting", flush=True)
         ssh_exec(rn.hw, rn.hw.resolved_start_cmd(), timeout=15.0)
-        _ = wait_operational  # reserviert, wie im simulierten Fabric
+        _ = wait_operational  # reserved, mirrors the simulated Fabric
 
     def wait_operational(self, timeout: float = 15.0, after: Optional[dict[int, int]] = None) -> bool:
         """Same detection pattern as the simulated Fabric.wait_operational:

@@ -1,6 +1,6 @@
 """
-Fabric: eine Menge Nodes die zusammen laufen. Startet, wartet auf
-Operational, stoppt beim Verlassen des Context-Managers.
+Fabric: a set of nodes running together. Starts them, waits for
+operational, stops them on exit from the context manager.
 """
 from __future__ import annotations
 
@@ -26,8 +26,15 @@ class FabricOptions:
     fabric_group: str = "239.10.0.1"
     diag_group: str = "239.10.0.2"
     cycle_duration_ms: int = 20
-    # Optional overrides zum Bauen des NodeSpec; leeres dict = Defaults.
+    # Optional overrides applied when building the NodeSpec; empty
+    # dict = defaults.
     timing_overrides: dict = field(default_factory=dict)
+    # Per-node extra environment variables for the node process.
+    # Format: {node_id: {var_name: value, ...}}. Passed through to the
+    # matching Node.extra_env in start_all(). Only relevant for the
+    # simulated fabric (hardware nodes are started over SSH via
+    # start_cmd and ignore this field).
+    extra_env_per_node: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -65,12 +72,13 @@ class Fabric:
                 binary=self.opts.binary,
                 config_path=cfg_path,
                 log_dir=log_dir,
+                extra_env=dict(self.opts.extra_env_per_node.get(own_id, {})),
             )
             node.start()
             self.nodes[own_id] = node
 
-        # Diagnostic client aufbauen NACH den Nodes damit die Multicast-
-        # Gruppe schon existiert.
+        # Build the diagnostic client AFTER the nodes so the multicast
+        # group already exists.
         self.diag = DiagClient(
             multicast_group=self.opts.diag_group,
             port=self.opts.diag_port,
@@ -78,9 +86,10 @@ class Fabric:
 
     def wait_operational(self, timeout: float = 15.0) -> bool:
         """
-        Wartet bis jeder Node einmal 'Operational' erreicht hat.
-        Erkennungspattern: 'transition from=CycleSync event=CycleSyncOk to=ReadInputs'
-        signalisiert dass Discovery + Sync durch und der erste Cycle laeuft.
+        Waits until every node has reached 'Operational' at least
+        once. Detection pattern: 'transition from=CycleSync
+        event=CycleSyncOk to=ReadInputs' signals that discovery + sync
+        completed and the first cycle is running.
         """
         pat = r"transition from=CycleSync event=CycleSyncOk to=ReadInputs"
         for node in self.nodes.values():
@@ -100,14 +109,14 @@ class Fabric:
 
     def restart_node(self, node_id: int, wait_operational: float = 8.0) -> None:
         """
-        Killt (falls noch lebendig) und respawnt den Node mit derselben
-        config. Der neue Prozess bindet die gleichen Multicast-Sockets;
-        das appended Log geht in dieselbe Datei (Node._read_loop
-        verwendet Append-Mode).
-    
-        Kein wait_operational-Check: der rejoin-Prozess laeuft nicht
-        ueber CycleSyncOk, sondern ueber ResyncLostPeer. Der Test soll
-        selbst mit wait_peer_health(target, "Probation") warten.
+        Kills (if still alive) and respawns the node with the same
+        config. The new process binds the same multicast sockets; the
+        appended log goes into the same file (Node._read_loop uses
+        append mode).
+
+        No wait_operational check: the rejoin process doesn't go
+        through CycleSyncOk, but through ResyncLostPeer. The test
+        itself should wait via wait_peer_health(target, "Probation").
         """
         if node_id not in self.nodes:
             raise KeyError(f"unknown node_id {node_id}")
@@ -116,17 +125,18 @@ class Fabric:
         if old.is_running():
             old.stop(timeout=2.0)
     
-        from .node import Node  # local import um circular zu vermeiden
+        from .node import Node  # local import to avoid a circular import
         new_node = Node(
             node_id=node_id,
             binary=old.binary,
             config_path=old.config_path,
             log_dir=old.log_dir,
             rust_log=old.rust_log,
+            extra_env=dict(old.extra_env),
         )
         new_node.start()
         self.nodes[node_id] = new_node
-        _ = wait_operational  # reserviert fuer zukuenftigen "warte bis Alive"-Modus
+        _ = wait_operational  # reserved for a future "wait until Alive" mode
 
 
 @contextmanager

@@ -1,16 +1,16 @@
 """
-T8 — Cycle Skew.
+T8 — Cycle skew.
 
-Setup:     3 Nodes stabil.
-Injection: cycle-delay <target> <ms> 1  (extra Sleep in ReadInputs).
-Erwartet:  Target startet den Cycle spaeter. Wenn der Delay unter den
-           in-cycle deadline-offsets bleibt, holt der Rendezvous-Pfad
-           ihn nach — Fabric laeuft weiter, kein Failsafe. Wenn er
-           deutlich groesser ist, muss er excluded werden.
+Setup:     3 stable nodes.
+Injection: cycle-delay <target> <ms> 1  (extra sleep in ReadInputs).
+Expected:  The target starts its cycle late. If the delay stays under
+           the in-cycle deadline offsets, the rendezvous path catches
+           it up -- the fabric keeps running, no failsafe. If the
+           delay is significantly larger, the node must be excluded.
 
-Wir testen den 'nicht zu viel Skew'-Pfad: 3 ms extra bei
-share_inputs_offset=5 ms. Sollte gerade eben klappen ohne Exklusion,
-und der Node sollte Alive bleiben.
+We test the "not too much skew" path: 3 ms extra delay against a
+share_inputs_offset of 5 ms. This should just barely work without an
+exclusion, and the node should stay Alive.
 """
 from harness.assertions import wait_cycles_advance, wait_peer_health
 
@@ -20,18 +20,18 @@ DELAY_MS = 3
 
 def test_cycle_skew_small_recovers(fabric_3):
     assert fabric_3.diag.cycle_delay(TARGET, DELAY_MS, 1), (
-        "cycle-delay injection nicht bestaetigt"
+        "cycle-delay injection not acknowledged"
     )
 
-    # Nach dem einen verzoegerten Cycle sollte target weiterhin Alive sein.
-    # Wir warten ein paar Cycles und pruefen dann.
+    # After the one delayed cycle, the target should still be Alive.
+    # We wait a few cycles and then check.
     survivors = [nid for nid in fabric_3.nodes if nid != TARGET]
     assert wait_cycles_advance(fabric_3, survivors[0], n_cycles=5, timeout=8.0)
 
-    # Ziel: peer 2 aus sicht der anderen ist Alive.
+    # Goal: from the other nodes' point of view, peer 2 is Alive.
     for survivor in survivors:
-        # Peer sollte NICHT Lost sein.
+        # The peer should NOT be Lost.
         peer_lost = wait_peer_health(fabric_3, survivor, TARGET, "Lost", timeout=1.0)
         assert peer_lost is None, (
-            f"target {TARGET} wurde nach kleinem Skew faelschlich excluded"
+            f"target {TARGET} was wrongly excluded after a small skew"
         )

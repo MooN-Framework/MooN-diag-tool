@@ -12,7 +12,8 @@ that call a small, fixed set of harness fixtures and helper functions
 those names is enough and stays trivially maintainable as new
 scenarios get added, without needing to import/execute anything.
 
-conftest.py's `_HardwareFabric` (see docs/harness_hardware.md) backs
+conftest.py's `_HardwareFabric` (see README.md's "Hardware mode
+internals" section) backs
 hardware mode with harness.hw_node.RemoteNode, so both of the
 previously-degraded helper groups now actually work there, given
 --hw-nodes-file (which the diag tool's Test tab always supplies when
@@ -74,14 +75,14 @@ def analyze_scenario(path: Path) -> ScenarioMeta:
 
     if any(re.search(rf"\b{re.escape(name)}\b", text) for name in _RESTARTS_REAL_HARDWARE):
         notes.append(
-            "restart_node() -- startet den echten Node-Prozess auf der "
-            "Hardware per SSH neu (stop_cmd/start_cmd)"
+            "restart_node() -- power-cycles the real node process on "
+            "the hardware over SSH (stop_cmd/start_cmd)"
         )
     if not has_tests:
         notes.append(
-            "keine Testfunktion in dieser Datei (nur ein Modul-weiter "
-            "pytest.mark.skip o.ae.) -- Ausfuehrung wuerde 0 Items "
-            "sammeln, pytest exit=5, kein echtes Pass/Fail"
+            "no test function in this file (only a module-wide "
+            "pytest.mark.skip or similar) -- running it would collect "
+            "0 items, pytest exit=5, not a real pass/fail"
         )
 
     return ScenarioMeta(
@@ -103,11 +104,11 @@ def infeasible_reason(meta: ScenarioMeta, configured_node_count: int) -> str:
     configured hardware nodes -- empty string if it can."""
     reasons: list[str] = []
     if not meta.has_tests:
-        reasons.append("keine Testfunktion in dieser Datei")
+        reasons.append("no test function in this file")
     if meta.required_nodes > configured_node_count:
         reasons.append(
-            f"braucht {meta.required_nodes} Knoten, "
-            f"nur {configured_node_count} konfiguriert"
+            f"needs {meta.required_nodes} node(s), "
+            f"only {configured_node_count} configured"
         )
     if meta.hw_status == "unsupported":
         reasons.extend(meta.hw_notes)

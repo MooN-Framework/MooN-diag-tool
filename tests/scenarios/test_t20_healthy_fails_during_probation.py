@@ -1,27 +1,26 @@
 """
-T20 — Ausfall eines gesunden Nodes waehrend ein anderer in Probation ist
-      => Failsafe.
+T20 — A healthy node fails while another is in probation => failsafe.
 
-Setup:     3 Nodes stabil (Node 0, 1, 2).
-Sequenz:
-    1. Target-Node (2) shutdown -> Peers sehen ihn als Lost.
-    2. Target-Node (2) neu starten -> re-admitted, laeuft im Probation-
-       Fenster (health = Probation).
-    3. Waehrend Node 2 noch in Probation ist: einen der beiden "gesunden"
-       Nodes (0) shutdownen.
+Setup:     3 stable nodes (0, 1, 2).
+Sequence:
+    1. Shut down the target node (2) -> peers see it as Lost.
+    2. Restart the target node (2) -> it is re-admitted and runs
+       through the probation window (health = Probation).
+    3. While node 2 is still in probation: shut down one of the two
+       "healthy" nodes (0).
 
-Erwartet:
-    Mit nur einem verifiziert-gesunden Node (Node 1) und einem in
-    Probation ist das Quorum nicht mehr sicher erreichbar. Fix B (kein
-    unilateraler exclude) verhindert dass Node 1 alleine weitermacht:
-    er muss in Failsafe gehen.
+Expected:
+    With only one verified-healthy node (node 1) and one node in
+    probation, quorum can no longer be safely reached. Fix B (no
+    unilateral exclude) prevents node 1 from continuing alone: it
+    must go to failsafe.
 
 Timing:
-    Wir muessen den Ausfall von Node 0 exakt IM Probation-Fenster
-    treffen. Probation-Dauer = probation_cycles (Default 10) * cycle_ms
-    (Default 20) = ~200 ms. Deshalb: wait_for_log auf das readmit-
-    Event (Lost -> Probation) und SOFORT danach shutdown ausloesen —
-    genau der gleiche Weg den T13 (rejoin) nutzt.
+    We need to hit node 0's failure exactly INSIDE the probation
+    window. Probation duration = probation_cycles (default 10) *
+    cycle_ms (default 20) = ~200 ms. So: wait_for_log on the readmit
+    event (Lost -> Probation) and trigger the shutdown IMMEDIATELY
+    afterwards -- the same approach T13 (rejoin) uses.
 """
 from harness.assertions import (
     any_node_reached_failsafe,
@@ -30,55 +29,56 @@ from harness.assertions import (
 )
 
 
-PROBATION_TARGET = 2   # Node der in Probation gehen soll
-FAIL_TARGET = 0        # gesunder Node der WAEHREND Probation ausfaellt
-OBSERVER = 1           # verbleibender Node — muss Failsafe erreichen
+PROBATION_TARGET = 2   # node that should enter probation
+FAIL_TARGET = 0        # healthy node that fails WHILE in probation
+OBSERVER = 1            # remaining node -- must reach failsafe
 
 
 def test_healthy_node_fails_during_probation(fabric_3):
-    # 1. Probation-Target sauber runterfahren.
+    # 1. Shut down the probation target cleanly.
     assert fabric_3.diag.shutdown(PROBATION_TARGET) is not None, (
-        "shutdown injection nicht bestaetigt"
+        "shutdown injection not acknowledged"
     )
     assert wait_node_died(fabric_3, PROBATION_TARGET, timeout=5.0)
 
-    # 2. Peers sehen ihn als Lost.
+    # 2. Peers see it as Lost.
     peer = wait_peer_health(fabric_3, OBSERVER, PROBATION_TARGET,
                             "Lost", timeout=8.0)
     assert peer is not None, (
-        f"observer {OBSERVER} sieht target {PROBATION_TARGET} nicht als Lost"
+        f"observer {OBSERVER} does not see target {PROBATION_TARGET} as Lost"
     )
 
-    # 3. Prozess neu starten -> readmit -> Probation.
+    # 3. Restart the process -> readmit -> probation.
     fabric_3.restart_node(PROBATION_TARGET)
 
-    # 4. Auf das readmit-Log-Ereignis am Observer warten. Sobald das
-    #    passiert IST der Node in Probation. Log-Weg statt GetStatus
-    #    weil das Probation-Fenster zu kurz zum Polling ist (siehe T13).
+    # 4. Wait for the readmit log event on the observer. As soon as
+    #    that happens, the node is in probation. Log-based instead of
+    #    GetStatus because the probation window is too short to poll
+    #    reliably (see T13).
     observer_node = fabric_3.nodes[OBSERVER]
     assert observer_node.wait_for_log(
         rf"peer readmitted.*peer_id={PROBATION_TARGET}", timeout=15.0
     ), (
-        f"observer {OBSERVER} hat target {PROBATION_TARGET} nicht "
-        f"readmitted (Lost->Probation)"
+        f"observer {OBSERVER} did not readmit target {PROBATION_TARGET} "
+        f"(Lost->Probation)"
     )
 
-    # 5. SOFORT den gesunden Node ausschalten. Wir sind jetzt im
-    #    Probation-Fenster (~200 ms). Der shutdown-Command selbst wartet
-    #    nicht auf Bestaetigung — er feuert und rennt.
+    # 5. IMMEDIATELY shut down the healthy node. We are now inside
+    #    the probation window (~200 ms). The shutdown command itself
+    #    doesn't wait for confirmation -- it fires and returns.
     fabric_3.diag.shutdown(FAIL_TARGET)
 
-    # 6. Der Ausfall muss real sein.
+    # 6. The failure must actually happen.
     assert wait_node_died(fabric_3, FAIL_TARGET, timeout=5.0), (
         f"node {FAIL_TARGET} process not exited"
     )
 
-    # 7. Erwartung: irgendein verbleibender Node erreicht Failsafe.
-    #    Wir pruefen bewusst nicht *welcher* (Observer oder das re-
-    #    startete Probation-Target) — Fix B garantiert nur dass kein
-    #    Node alleine weiterlaeuft.
+    # 7. Expectation: some remaining node reaches failsafe. We
+    #    deliberately don't check *which* one (the observer or the
+    #    restarted probation target) -- Fix B only guarantees that no
+    #    node keeps running alone.
     failed_id = any_node_reached_failsafe(fabric_3, timeout=15.0)
     assert failed_id is not None, (
-        "kein Node in Failsafe — Fabric haette bei "
-        "1 gesunder + 1 Probation-Node nicht weiterlaufen duerfen"
+        "no node reached failsafe -- the fabric should not have kept "
+        "running with 1 healthy node + 1 probation node"
     )

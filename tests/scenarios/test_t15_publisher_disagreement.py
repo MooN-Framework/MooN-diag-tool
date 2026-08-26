@@ -1,21 +1,21 @@
 """
-T15 - Publisher Disagreement (aktualisiert).
+T15 — Publisher disagreement (updated).
 
-Setup:     3 Nodes stabil.
+Setup:     3 stable nodes.
 Injection: divergent-publisher <target> 1.
-Erwartet:  Target sendet Ack mit falschem publisher_candidate.
-           Aus Peers-Sicht bucketen die drei picks: 2 gleiche + 1
-           divergent. Majority ermittelbar → peers proposen target.
-           Target selbst sieht Consensus (own_pick + peer picks aus
-           seiner Sicht sind ok), landet ueber peer_in_error-
-           Rendezvous in EM, wird per self_excluded_by_peers zum
-           SelfExcluded → Isolation.
-           Peers laufen im 2-Node-Betrieb weiter.
+Expected:  The target sends an ack with the wrong publisher_candidate.
+           From the peers' point of view, the three picks bucket into
+           2 matching + 1 divergent. A majority can be determined →
+           peers propose the target. The target itself sees consensus
+           (its own pick + peer picks look fine from its own view),
+           lands in EM via the peer_in_error rendezvous, and is
+           marked SelfExcluded → Isolation via self_excluded_by_peers.
+           Peers continue running in 2-node operation.
 
-Aenderung ggue frueherem Verhalten: Publisher-Divergenz mit
-identifizierbarer Mehrheit ist kein Byzantine-Fall mehr. Nur wenn
-gar keine Mehrheit ermittelbar ist (z.B. 3 verschiedene Picks in
-3-Node) bleibt es Failsafe.
+Change from earlier behaviour: publisher divergence with an
+identifiable majority is no longer treated as a Byzantine case. Only
+when no majority can be determined at all (e.g. 3 different picks in
+a 3-node cluster) does it remain a failsafe case.
 """
 from harness.assertions import (
     wait_cycles_advance,
@@ -28,12 +28,12 @@ TARGET = 2
 
 def test_publisher_disagreement(fabric_3):
     assert fabric_3.diag.divergent_publisher(TARGET, 1), (
-        "injection nicht bestaetigt"
+        "injection not acknowledged"
     )
 
     target_status = wait_node_state(fabric_3, TARGET, "Isolation", timeout=8.0)
     assert target_status is not None, (
-        f"target {TARGET} sollte in Isolation sein"
+        f"target {TARGET} should be in Isolation"
     )
 
     survivors = [nid for nid in fabric_3.nodes if nid != TARGET]

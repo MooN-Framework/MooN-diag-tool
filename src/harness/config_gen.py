@@ -18,8 +18,8 @@ must produce the same bytes for the same config):
 - LF newlines; no trailing newline
 - the top-level `integrity` key is excluded when computing the digest
 
-The Rust side implements the same walk with `toml::Value` + `sha2`.
-See docs/rust_fix_config_checksum.md for the patch.
+The Rust side implements the same walk with `toml::Value` + `sha2`
+(see `NodeConfig::verify_and_parse` in the voting-node repo).
 """
 from __future__ import annotations
 

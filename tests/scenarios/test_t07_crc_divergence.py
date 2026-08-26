@@ -1,18 +1,19 @@
 """
-T7 - CRC Divergence (aktualisiert).
+T7 — CRC divergence (updated).
 
-Setup:     3 Nodes stabil.
+Setup:     3 stable nodes.
 Injection: fake-crc <target> 1.
-Erwartet:  Target sendet CRC = 0xDEADBEEF, Peers sehen Divergenz.
-           Sie ermitteln per Mehrheit die korrekte CRC (die 2 gesunden
-           Peers agreen) und proposen target zum Ausschluss. Target
-           wird per self_excluded_by_peers-Detektor in EM zum
+Expected:  The target sends CRC = 0xDEADBEEF, peers see the
+           divergence. They determine the correct CRC by majority
+           (the 2 healthy peers agree) and propose the target for
+           exclusion. The target detects this via
+           self_excluded_by_peers in EM and transitions to
            SelfExcluded → Isolation.
-           Peers laufen im 2-Node-Betrieb weiter.
+           Peers continue running in 2-node operation.
 
-Aenderung ggue frueherem Verhalten: es sterben NICHT mehr alle drei.
-Isolation ist die richtige Reaktion auf einen einzelnen Divergenten
-in 2oo3 solange (n - k) >= minimum.
+Change from earlier behaviour: not all three nodes die anymore.
+Isolation is the correct reaction to a single divergent node in 2oo3
+as long as (n - k) >= minimum.
 """
 from harness.assertions import (
     wait_cycles_advance,
@@ -24,22 +25,22 @@ TARGET = 2
 
 
 def test_crc_divergence(fabric_3):
-    assert fabric_3.diag.fake_crc(TARGET, 1), "injection nicht bestaetigt"
+    assert fabric_3.diag.fake_crc(TARGET, 1), "injection not acknowledged"
 
-    # Target geht in Isolation (Prozess lebt weiter, aber isoliert).
+    # The target goes into Isolation (the process keeps running, but isolated).
     target_status = wait_node_state(fabric_3, TARGET, "Isolation", timeout=8.0)
     assert target_status is not None, (
-        f"target {TARGET} sollte in Isolation sein"
+        f"target {TARGET} should be in Isolation"
     )
 
-    # Peers sehen target als Lost und laufen weiter.
+    # Peers see the target as Lost and keep running.
     survivors = [nid for nid in fabric_3.nodes if nid != TARGET]
     for survivor in survivors:
         peer = wait_peer_health(fabric_3, survivor, TARGET, "Lost", timeout=8.0)
         assert peer is not None, (
-            f"node {survivor} sieht target {TARGET} nicht als Lost"
+            f"node {survivor} does not see target {TARGET} as Lost"
         )
 
     assert wait_cycles_advance(fabric_3, survivors[0], n_cycles=5, timeout=8.0), (
-        "peers laufen nach CRC-Divergenz nicht weiter"
+        "peers did not keep running after the CRC divergence"
     )
