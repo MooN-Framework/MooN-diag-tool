@@ -50,7 +50,7 @@ class NodeSpec:
     send_ack_offset_ms: int = 14
     crc_offset_ms: int = 17
     init_sync_timeout_ms: int = 2000
-    peer_sync_timeout_ms: int = 500
+    clock_sync_timeout_ms: int = 500
     cycle_sync_timeout_ms: int = 10
     error_mgmt_timeout_ms: int = 20
     state_sync_timeout_ms: int = 500
@@ -110,7 +110,7 @@ def spec_to_dict(spec: NodeSpec) -> dict[str, Any]:
             "send_ack_offset_ms": spec.send_ack_offset_ms,
             "crc_offset_ms": spec.crc_offset_ms,
             "init_sync_timeout_ms": spec.init_sync_timeout_ms,
-            "peer_sync_timeout_ms": spec.peer_sync_timeout_ms,
+            "clock_sync_timeout_ms": spec.clock_sync_timeout_ms,
             "cycle_sync_timeout_ms": spec.cycle_sync_timeout_ms,
             "error_mgmt_timeout_ms": spec.error_mgmt_timeout_ms,
             "state_sync_timeout_ms": spec.state_sync_timeout_ms,
@@ -161,7 +161,7 @@ def render_toml_str(spec: NodeSpec) -> str:
         f"crc_offset_ms           = {spec.crc_offset_ms}\n"
         f"\n"
         f"init_sync_timeout_ms        = {spec.init_sync_timeout_ms}\n"
-        f"peer_sync_timeout_ms        = {spec.peer_sync_timeout_ms}\n"
+        f"clock_sync_timeout_ms        = {spec.clock_sync_timeout_ms}\n"
         f"cycle_sync_timeout_ms       = {spec.cycle_sync_timeout_ms}\n"
         f"error_mgmt_timeout_ms       = {spec.error_mgmt_timeout_ms}\n"
         f"state_sync_timeout_ms       = {spec.state_sync_timeout_ms}\n"

@@ -64,7 +64,7 @@ NODE_STATE_NAMES: dict[int, str] = {
     0x07: "PublishResult",
     0x08: "ErrorManagement",
     0x09: "Isolation",
-    0x0A: "PeerSync",
+    0x0A: "ClockSync",
     0x0B: "ResyncLostPeer",
     0x0C: "SystemStateCrcExchange",
     0x0D: "SystemStateSync",

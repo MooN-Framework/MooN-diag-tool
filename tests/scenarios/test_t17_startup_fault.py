@@ -10,7 +10,7 @@ Setup:     A custom 3-node fabric (fabric_3 can't be used here, since
 Expected:  Node 0 runs into the self-test failure path in
            handle_startup, calls mark_failsafe(SelfTestFailed),
            transitions to Failsafe, and exits. Nodes 1 and 2 never
-           see node 0 in InitSync → PeerSyncTimeout → Failsafe. All
+           see node 0 in InitSync → ClockSyncTimeout → Failsafe. All
            three end in failsafe.
 
            For node 0, the exact last_failsafe_reason =

@@ -23,7 +23,7 @@ Why skipped:
        node 2 lands in InitialSyncTimeout, not in rejoin detection.
 
     Observed behaviour (per the session log): node 2 starts fresh,
-    receives peer frames, and goes through InitSync → PeerSync →
+    receives peer frames, and goes through InitSync → ClockSync →
     cycle operation completely normally. The rejoin path is never
     entered at all.
 

@@ -5,7 +5,7 @@ Why skipped:
     The SystemStateSync state is only reached via the rejoin flow,
     after a successful ResyncLostPeer. Triggering
     SystemStateSyncTimeout requires the snapshot exchange after the
-    peer sync to fail -- the peers would have to go silent EXACTLY
+    clock sync to fail -- the peers would have to go silent EXACTLY
     between ResyncLostPeerOk and SystemStateSync.
 
     That window is too small to control reliably with the current
@@ -15,7 +15,7 @@ Why skipped:
     SystemStateSync transition onward.
 
     A config override `state_sync_timeout_ms=1` would be possible
-    (analogous to T32's approach for PeerSyncTimeout). That would make
+    (analogous to T32's approach for ClockSyncTimeout). That would make
     the snapshot exchange time out deterministically. Not implemented
     because this path leads to `Isolation` (not Failsafe like the
     other timeouts), and Isolation is harmless enough that it causes

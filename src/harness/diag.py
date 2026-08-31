@@ -68,7 +68,7 @@ NODE_STATE_WIRE = {
     "PublishResult":           0x07,
     "ErrorManagement":         0x08,
     "Isolation":               0x09,
-    "PeerSync":                0x0A,
+    "ClockSync":                0x0A,
     "ResyncLostPeer":          0x0B,
     "SystemStateCrcExchange":  0x0C,
     "SystemStateSync":         0x0D,
