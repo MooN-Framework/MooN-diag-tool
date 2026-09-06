@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
-from .config_gen import NodeSpec, render_config
+from .config_gen import NodeSpec, derive_timing, render_config
 from .diag import DiagClient
 from .node import Node
 
@@ -52,8 +52,16 @@ class Fabric:
             diag_port=self.opts.diag_port,
             fabric_group=self.opts.fabric_group,
             diag_group=self.opts.diag_group,
-            cycle_duration_ms=self.opts.cycle_duration_ms,
         )
+        # Derive the whole timing section from the cycle first. Setting
+        # cycle_duration_ms alone used to leave the phase offsets and
+        # timeouts at their 20ms defaults, so any test running a
+        # non-default cycle got an inconsistent config unless it happened
+        # to pass timing_overrides as well.
+        for k, v in derive_timing(self.opts.cycle_duration_ms).items():
+            setattr(base, k, v)
+        # Explicit overrides win — several scenarios deliberately set an
+        # unusable timeout to force a phase into its deadline.
         for k, v in self.opts.timing_overrides.items():
             setattr(base, k, v)
         return base

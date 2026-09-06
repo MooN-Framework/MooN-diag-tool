@@ -41,6 +41,7 @@ from harness.config_gen import (
     ChecksumError,
     make_spec,
     render_toml_str,
+    timing_warnings,
     verify_toml_str,
 )
 
@@ -234,10 +235,18 @@ class ConfigTab(QWidget):
         self.preview.setPlainText(text)
         # auto-verify to catch mistakes in render vs. checksum
         try:
-            verify_toml_str(text)
-            self._set_status("checksum ✓", "success")
+            cfg = verify_toml_str(text)
         except ChecksumError as e:
             self._set_status(f"checksum invalid: {e}", "danger")
+            return
+        # A config can be checksum-clean and still be a timing combination
+        # that only just works. Surface that here rather than letting it
+        # show up as sporadic phase timeouts on the target.
+        warnings = timing_warnings(cfg["timing"])
+        if warnings:
+            self._set_status(f"checksum ✓ · {warnings[0]}", "warning")
+        else:
+            self._set_status("checksum ✓", "success")
 
     def _on_verify(self) -> None:
         text = self.preview.toPlainText()
@@ -301,6 +310,7 @@ class ConfigTab(QWidget):
         self.status_lbl.setText(text)
         colors = {
             "success": QColor("#23A55A"),
+            "warning": QColor("#F0B232"),
             "danger":  QColor("#DA373C"),
             "muted":   QColor("#949BA4"),
         }

@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pytest
 
+from harness.config_gen import derive_timing
 from harness.fabric import Fabric, FabricOptions
 
 
@@ -51,30 +52,15 @@ _CYCLE_RE = re.compile(r"cycle duration.*cycle_us=(\d+)")
 
 def _scaled_timing(cycle_ms: int) -> dict:
     """
-    Scales the in-cycle offsets proportionally to the defaults
-    (cycle=20 -> SI=5, SR=10, SA=14, CRC=17). Rounds to whole ms.
+    Full timing section for this cycle duration, derived by the shared
+    generator so a sweep candidate cannot end up with scaled in-cycle
+    offsets next to unscaled timeouts.
 
-    For cycle_ms <= 4 the offsets would collapse; we then enforce
-    send_interval < share_inputs_offset via a floor of 1 ms. A cycle_ms
-    that's too small then already fails at validate(), which is
-    exactly the expected behaviour (the candidate is considered
-    "unstable").
+    A cycle_ms that is too small raises ValueError, which the sweep
+    treats as an unusable candidate — the same verdict it would reach
+    from the node's own validate().
     """
-    ratio = cycle_ms / 20
-    si = max(1, round(5 * ratio))
-    sr = max(si + 1, round(10 * ratio))
-    sa = max(sr + 1, round(14 * ratio))
-    crc = max(sa + 1, round(17 * ratio))
-
-    return dict(
-        cycle_duration_ms=cycle_ms,
-        share_inputs_offset_ms=si,
-        share_result_offset_ms=sr,
-        send_ack_offset_ms=sa,
-        crc_offset_ms=crc,
-        # We do not scale the non-cycle timeouts: they are already
-        # independent of the cycle duration.
-    )
+    return derive_timing(cycle_ms)
 
 
 def _analyze_node_log(log_path: Path) -> tuple[int, int, list[int]]:
