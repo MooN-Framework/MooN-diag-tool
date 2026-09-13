@@ -1,26 +1,33 @@
 """
-T3 — Silent before input.
+T4 — Silent in CycleSync.
 
-Like T1, except the target swallows its own input entirely instead of
-its results and acks. The peers time out in ShareInputs, enter EM and
-exclude it; the target follows via the rendezvous and goes to
-Isolation. The remaining two carry on in 2-node operation.
+Setup:     3 stable nodes (fabric_3).
+Injection: drop_cyclesync <target> 1 (the target suppresses its own
+           CycleSync beacon for one cycle, everything else stays
+           untouched).
+Expected:  The peers wait for the target's beacon, hit the CycleSync
+           deadline and enter EM, where the missing-peer attribution
+           has two independent reporters and the exclusion is
+           confirmed. The target keeps receiving peer frames, so it
+           picks up the peers' EM state -- but CycleSync itself has no
+           rendezvous edge, so the latch is only consumed by the next
+           phase handler (ShareInputs). It therefore reaches EM one
+           phase later, recognises the confirmed exclusion against
+           itself and goes to Isolation. The remaining two carry on in
+           2-node operation.
 
-Why this is no longer a triple failsafe:
-    The target used to sit out the full deadline of every phase before
-    noticing anything, by which time the peers had already finished
-    their EM round and excluded it. It then found an empty EM phase,
-    ran into `StateTimeout`, went to Failsafe and broadcast
-    GoFailsafe, which took the healthy pair with it.
+Difference from T29:
+    T29 injects the same fault but asserts only the state-machine edge
+    (CycleSync, CycleSyncTimeout) -> ErrorManagement on one observer.
+    T04 asserts the system-level outcome instead: who ends up
+    excluded, and that the healthy pair survives without a GoFailsafe
+    cascade.
 
-    The rendezvous flag is now part of the completion predicate of the
-    four in-cycle phases, so the target leaves the phase the moment a
-    peer signals ErrorManagement. It reaches EM in time to hear both
-    exclusion proposals against itself, recognises them via
-    `self_excluded_by_peers` and goes to Isolation. Same detection,
-    same exclusion, but the healthy pair survives -- the availability
-    that 2oo3 exists for. Compare T7 and T25, which have had these
-    semantics for the divergence cases all along.
+Difference from T01/T03:
+    Same outcome, but the fault hits the phase *before* any payload is
+    exchanged. The target never contributes to the cycle at all, so
+    the exclusion rests purely on the beacon attribution rather than
+    on a missing input or result.
 """
 from harness.assertions import (
     wait_cycles_advance,
@@ -32,9 +39,9 @@ TARGET = 2
 SURVIVOR_CYCLES = 10
 
 
-def test_silent_before_input(fabric_3):
-    assert fabric_3.diag.drop_inputs(TARGET, 1) is not None, (
-        "drop_inputs injection not acknowledged"
+def test_silent_cyclesync(fabric_3):
+    assert fabric_3.diag.drop_cyclesync(TARGET, 1) is not None, (
+        "drop_cyclesync injection not acknowledged"
     )
 
     # The target is excluded and isolates itself instead of failing safe.
