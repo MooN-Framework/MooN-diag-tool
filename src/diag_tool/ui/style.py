@@ -102,14 +102,39 @@ QPushButton[danger="true"]:hover {{
     color: white;
     border-color: {DANGER};
 }}
+/* Settings tab's Apply button: unsaved-changes state. Takes priority
+   over [accent="true"] since both can be set at once (the button is
+   accent-styled by default) -- this rule comes after it in the
+   stylesheet, so it wins for the properties it overrides. */
+QPushButton[dirty="true"] {{
+    background-color: {WARNING};
+    color: #1E1F22;
+    border-color: {WARNING};
+    font-weight: 700;
+}}
+QPushButton[dirty="true"]:hover {{
+    background-color: #F5C463;
+    border-color: #F5C463;
+}}
 
 /* ---- Inputs ---- */
+/* min-height is load-bearing, not cosmetic. The padding below does NOT
+   make it into a styled input's sizeHint, so a bare QLineEdit/QSpinBox
+   rendered at 21px total: 12px of that is padding and 2px is border,
+   leaving about 7px for the text, which is why the Settings > Network
+   fields were unreadable. It went unnoticed in Settings > Paths and
+   similar rows only because the "…" browse button next to them is
+   taller and pulled the row up to 31px, so the effect was invisible
+   wherever a field happened to share a row with a button. min-height
+   applies to the content rect, so the rendered height is this value
+   plus 12px padding and 2px border, i.e. 32px. */
 QLineEdit, QSpinBox, QComboBox, QPlainTextEdit, QTextEdit {{
     background-color: {BG_INPUT};
     color: {TEXT};
     border: 1px solid {BORDER_SOFT};
     border-radius: 6px;
     padding: 6px 8px;
+    min-height: 18px;
     selection-background-color: {ACCENT};
 }}
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus,
@@ -306,6 +331,7 @@ QSplitter::handle:hover {{ background-color: {ACCENT}; }}
    text vanishes into the padding. Tighten it here. */
 QAbstractItemView QLineEdit {{
     padding: 2px 4px;
+    min-height: 0;
     border-radius: 3px;
     border: 1px solid {ACCENT};
     background-color: {BG_INPUT};

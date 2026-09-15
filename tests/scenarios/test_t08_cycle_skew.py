@@ -1,5 +1,5 @@
 """
-T8 — Cycle skew.
+T08 — Cycle skew.
 
 Setup:     3 stable nodes.
 Injection: cycle-delay <target> <ms> 1  (extra sleep in ReadInputs).

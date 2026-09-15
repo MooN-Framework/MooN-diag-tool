@@ -49,7 +49,7 @@ class NodeSpec:
     share_result_offset_ms: int = 10
     send_ack_offset_ms: int = 14
     crc_offset_ms: int = 17
-    init_sync_timeout_ms: int = 2000
+    init_sync_timeout_ms: int = 15_000
     # The remaining timeouts are what derive_timing(20) produces; keep
     # them in sync with it so a NodeSpec built by hand at the default
     # cycle matches a derived one.
@@ -546,12 +546,12 @@ def make_spec(
     fabric_group: str = "239.10.0.1", fabric_port: int = 5555,
     diag_group: str = "239.10.0.2", diag_port: int = 6666,
     interface: str = "lo",
-    init_sync_timeout_ms: int = 2000,
+    init_sync_timeout_ms: int = 15_000,
     send_interval_ms: int = 1,
 ) -> NodeSpec:
     """Build a NodeSpec with a timing section derived from cycle_ms.
 
-    init_sync_timeout_ms defaults to the same 2000ms NodeSpec used to
+    init_sync_timeout_ms defaults to the same 15000ms NodeSpec used to
     default to, kept as an explicit parameter because it often needs to
     be much higher on real hardware than in simulated/loopback tests
     (nodes powering up at different times, slower boot, etc.) -- unlike

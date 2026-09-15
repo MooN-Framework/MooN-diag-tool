@@ -76,7 +76,18 @@ class Node:
     def _read_loop(self) -> None:
         assert self._proc and self._proc.stdout
         log_file = self.log_dir / f"node_{self.node_id}.log"
-        with log_file.open("w") as f:
+        # Append, not truncate: Fabric.restart_node() creates a brand
+        # new Node instance with the same log_dir/node_id and starts a
+        # fresh _read_loop() on it. "w" here wiped every pre-restart
+        # log line from disk on every restart_node() call -- exactly
+        # the moment a human most needs the full history (e.g. what a
+        # node logged right before a restart-triggering scenario like
+        # t20's "healthy fails during probation"). RemoteNode's
+        # hardware counterpart (harness/hw_node.py) is explicitly
+        # designed to keep one continuous stream across a restart via
+        # its persistent `tail -F`; this makes the local/simulated
+        # on-disk log match that same append-across-restart guarantee.
+        with log_file.open("a") as f:
             for line in self._proc.stdout:
                 line = line.rstrip("\n")
                 f.write(line + "\n")

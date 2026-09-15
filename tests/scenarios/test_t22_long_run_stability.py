@@ -51,6 +51,18 @@ MAX_TRANSIENT_MISSES_PER_NODE = 1
 LOG_TAIL_LINES = 30    # log lines per node to show on a failure
 SETUP_TIMEOUT_S = 15.0
 
+# Picked up by diag_tool.core.scenario_meta so the GUI can grey this
+# scenario out before a hardware run instead of offering it and then
+# reporting a skip. The runtime guard in long_run_fabric stays as a
+# second line of defence for hand-run pytest invocations.
+# Plain literal on purpose: scenario_meta reads this via ast and only
+# accepts a constant string, so no f-string here.
+HW_UNSUPPORTED = (
+    "builds its own fabric with a non-standard cycle duration "
+    "(see CYCLE_MS) -- hardware nodes are deployed once per session "
+    "with a fixed config and cannot be re-parametrised per scenario"
+)
+
 
 @dataclass
 class Snapshot:

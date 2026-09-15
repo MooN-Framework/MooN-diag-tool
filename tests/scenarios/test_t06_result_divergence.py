@@ -1,5 +1,5 @@
 """
-T6 — Result divergence.
+T06 — Result divergence.
 
 Setup:     3 stable nodes.
 Injection: Node 2 sends a tampered BrakeResult (large distance shift

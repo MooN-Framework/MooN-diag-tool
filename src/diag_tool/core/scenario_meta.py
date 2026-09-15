@@ -29,14 +29,29 @@ it runs in hardware mode):
     modes since it polls GetStatus via `fabric.diag`
 
 No scenario is marked hw-"unsupported" purely for using one of these
-helpers anymore -- only a node-count mismatch (fabric_4 scenario,
-fewer than 4 hardware nodes configured) still makes one infeasible.
+helpers anymore. Two things still make one infeasible:
+  - a node-count mismatch (fabric_4 scenario, fewer than 4 hardware
+    nodes configured)
+  - an explicit module-level `HW_UNSUPPORTED = "<reason>"` constant
+
 restart_node() gets a lightweight informational note instead (still
 hw_status "ok") since it's worth knowing a scenario power-cycles a
 real remote process before running it unattended.
+
+Why the explicit constant:
+    A handful of scenarios cannot run on hardware for reasons nothing
+    in their source betrays -- T17 needs an env var baked into the
+    node's start_cmd, T22 builds its own fabric with a non-standard
+    cycle duration. Both used to guard themselves with a runtime
+    `pytest.skip(...)` only, which works but is invisible to this
+    analysis, so the GUI offered them, ran them, and reported a skip
+    the user could have been told about beforehand. The constant makes
+    that declarative. The runtime skip stays in place as a second line
+    of defence for hand-run pytest invocations.
 """
 from __future__ import annotations
 
+import ast
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,12 +79,39 @@ class ScenarioMeta:
 
 _TEST_FUNC_RE = re.compile(r"^\s*(?:async\s+)?def\s+test_\w+", re.MULTILINE)
 
+# Module-level constant a scenario sets to opt out of hardware runs.
+_HW_UNSUPPORTED_NAME = "HW_UNSUPPORTED"
+
+
+def _hw_unsupported_reason(text: str) -> str | None:
+    """The scenario's own `HW_UNSUPPORTED = "<reason>"`, or None.
+
+    Parsed with `ast` rather than a regex: the reason is usually an
+    implicitly concatenated multi-line string literal, which a regex
+    would either truncate or mis-terminate. `ast.parse` builds a tree
+    without importing or executing anything, so the no-execution
+    property of this module still holds.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == _HW_UNSUPPORTED_NAME:
+                if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                    return node.value.value
+    return None
+
 
 def analyze_scenario(path: Path) -> ScenarioMeta:
     text = path.read_text(errors="ignore")
 
     required_nodes = 4 if re.search(r"\bfabric_4\b", text) else 3
     has_tests = bool(_TEST_FUNC_RE.search(text))
+    hw_unsupported = _hw_unsupported_reason(text)
 
     notes: list[str] = []
 
@@ -78,6 +120,8 @@ def analyze_scenario(path: Path) -> ScenarioMeta:
             "restart_node() -- power-cycles the real node process on "
             "the hardware over SSH (stop_cmd/start_cmd)"
         )
+    if hw_unsupported:
+        notes.append(hw_unsupported)
     if not has_tests:
         notes.append(
             "no test function in this file (only a module-wide "
@@ -87,7 +131,8 @@ def analyze_scenario(path: Path) -> ScenarioMeta:
 
     return ScenarioMeta(
         path=path, required_nodes=required_nodes,
-        hw_status="ok", hw_notes=tuple(notes), has_tests=has_tests,
+        hw_status="unsupported" if hw_unsupported else "ok",
+        hw_notes=tuple(notes), has_tests=has_tests,
     )
 
 

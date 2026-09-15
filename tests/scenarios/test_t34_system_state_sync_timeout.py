@@ -20,8 +20,11 @@ Why skipped:
     because this path leads to `Isolation` (not Failsafe like the
     other timeouts), and Isolation is harmless enough that it causes
     no cluster behaviour change -- the test assertion would just be
-    "node X is in Isolation and the rest keeps running", which T25
-    already covers for a different trigger.
+    "node X is in Isolation and the rest keeps running", which T07
+    and T15 already assert for different triggers. (T25 is NOT the
+    right reference here: it only checks peer health == Lost plus
+    continued cycling on the survivors, never the target's own
+    Isolation state.)
 
 If this edge becomes critical later:
     - Fabric with `timing_overrides={"state_sync_timeout_ms": 1}`

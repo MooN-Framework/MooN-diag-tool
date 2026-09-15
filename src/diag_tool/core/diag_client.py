@@ -292,18 +292,52 @@ class DiagClient:
             self.send_raw(telegram)
             return {nid: None for nid in node_ids}
 
-        # Blocking wait per target -- acceptable since triggered by a user click.
-        results: dict[int, Optional[DiagTelegram]] = {}
-        for nid in node_ids:
-            resp = self.request(
-                telegram,
-                lambda t, nid=nid: (
-                    t.raw.get("type") == "staged"
-                    and t.raw.get("source_node_id") == nid
-                ),
-                timeout=timeout,
-            )
-            results[nid] = resp
+        # Send the (single) broadcast telegram once, then wait for a
+        # "staged" ack from every target in parallel, resending only
+        # while at least one target hasn't acked yet.
+        #
+        # BUG (fixed): this used to call self.request(telegram, ...)
+        # once per target in a loop. request() unconditionally
+        # (re)sends `telegram` -- which already carries
+        # targets=node_ids, i.e. ALL selected nodes -- on every call.
+        # So for N targets the same broadcast command got sent N times
+        # to every node, not once. For counting injections
+        # (inject_drop_inputs count=1, inject_mute, ...) this meant
+        # each additional target in the selection silently multiplied
+        # how many times the fault was actually applied on every node,
+        # not just the one being waited on.
+        resend_interval = 0.3  # same default as request()
+        pending = set(node_ids)
+        results: dict[int, Optional[DiagTelegram]] = {nid: None for nid in node_ids}
+
+        def match_fn(t: DiagTelegram) -> bool:
+            return t.raw.get("type") == "staged" and t.source_node_id in pending
+
+        q = self._register_response(match_fn)
+        deadline = time.monotonic() + timeout
+        try:
+            while pending and time.monotonic() < deadline:
+                self.send_raw(telegram)
+                # Drain every ack that shows up within this resend
+                # window before deciding whether to send again -- acks
+                # from several targets typically arrive back-to-back,
+                # and resending the broadcast after popping just the
+                # first one (leaving the others still "pending" for a
+                # moment) reintroduces the same multi-send bug this
+                # rewrite is fixing, just delayed by one queue item.
+                window_deadline = min(deadline, time.monotonic() + resend_interval)
+                while pending and time.monotonic() < window_deadline:
+                    remaining = window_deadline - time.monotonic()
+                    try:
+                        t = q.get(timeout=max(remaining, 0.001))
+                    except queue.Empty:
+                        break
+                    nid = t.source_node_id
+                    if nid in pending:
+                        results[nid] = t
+                        pending.discard(nid)
+        finally:
+            self._unregister_response(q)
         return results
 
     def broadcast_input(self, value: dict) -> None:

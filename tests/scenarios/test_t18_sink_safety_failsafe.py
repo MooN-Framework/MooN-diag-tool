@@ -12,10 +12,10 @@ Expected:  All three nodes reach consensus on emergency=true.
 """
 from harness.assertions import wait_node_died
 
-# 200 m/s from a standstill with 20 m of remaining distance: the
-# total distance required is so large that emergency_brake is
-# guaranteed to be set -- unbrakeable across the entire deceleration
-# table.
+# 200 m/s down to a standstill with only 20 m of remaining distance:
+# the braking distance required is so much larger than what is
+# available that emergency_brake is guaranteed to be set --
+# unbrakeable across the entire deceleration table.
 UNSAFE_INPUT = {
     "current_speed": 200.0,
     "target_speed": 0.0,

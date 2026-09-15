@@ -1,5 +1,5 @@
 """
-T2 — Shutdown (hard failure).
+T02 — Shutdown (hard failure).
 
 Setup:     3 stable nodes.
 Injection: shutdown <target>.

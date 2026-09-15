@@ -18,3 +18,9 @@ class Bus(QObject):
     diag_telegram = Signal(object)     # DiagTelegram
     node_changed = Signal(object)      # NodeView
     log_message = Signal(str)          # free-form text for the log tab
+    # Fired once per settings apply, regardless of which tab triggered
+    # it (Settings tab's Apply button, or a hardware-nodes dialog save
+    # in the Test/Timing/Package tab) -- lets every tab reactively
+    # re-sync its mode label / target-node dropdown / build fields
+    # without the app needing a restart to pick up a mode switch.
+    settings_changed = Signal(object)  # AppSettings

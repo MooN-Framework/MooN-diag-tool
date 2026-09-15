@@ -1,5 +1,5 @@
 """
-T1 — Silent after input.
+T01 — Silent after input.
 
 Setup:     3 stable nodes (fabric_3).
 Injection: silent <target> 1  (drop-results + drop-acks combined).
@@ -28,7 +28,7 @@ Why this is no longer a triple failsafe:
     exclusion proposals against itself, recognises them via
     `self_excluded_by_peers` and goes to Isolation. Same detection,
     same exclusion, but the healthy pair survives -- the availability
-    that 2oo3 exists for. Compare T7 and T25, which have had these
+    that 2oo3 exists for. Compare T07 and T25, which have had these
     semantics for the divergence cases all along.
 """
 from harness.assertions import (

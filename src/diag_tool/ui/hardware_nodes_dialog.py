@@ -23,13 +23,11 @@ re-typing it later.
 from __future__ import annotations
 
 import threading
-from typing import Optional
 
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -116,12 +114,19 @@ class HardwareNodesDialog(QDialog):
         add_btn.clicked.connect(lambda: self._add_row(HardwareNode(
             node_id=self.table.rowCount(), host="", user="root",
         )))
+        dup_btn = QPushButton("Duplicate selected")
+        dup_btn.setToolTip(
+            "Copy the selected row(s) as new rows with every field the "
+            "same except the ID (auto-assigned to the next free one) -- "
+            "handy when a new node is identical except for its IP."
+        )
+        dup_btn.clicked.connect(self._duplicate_selected)
         del_btn = QPushButton("Remove selected")
         del_btn.setProperty("danger", True)
         del_btn.clicked.connect(self._del_selected)
         probe_btn = QPushButton("Probe all")
         probe_btn.clicked.connect(self._probe_all)
-        toolbar.addWidget(add_btn); toolbar.addWidget(del_btn)
+        toolbar.addWidget(add_btn); toolbar.addWidget(dup_btn); toolbar.addWidget(del_btn)
         toolbar.addWidget(probe_btn); toolbar.addStretch(1)
         outer.addLayout(toolbar)
 
@@ -165,8 +170,75 @@ class HardwareNodesDialog(QDialog):
         for r in rows:
             self.table.removeRow(r)
 
-    def collect(self) -> list[HardwareNode]:
-        out: list[HardwareNode] = []
+    def _row_cell_text(self, row: int, col: int) -> str:
+        item = self.table.item(row, col)
+        return item.text() if item else ""
+
+    def _duplicate_selected(self) -> None:
+        """Clone the selected row(s) verbatim (same host, credentials,
+        commands, everything) except the ID, which is auto-assigned to
+        the next free one -- keeping the source row's ID would create
+        two rows claiming the same node. The common case this is for:
+        a new node that's identical to an existing one apart from its
+        IP -- duplicate, then just edit the Host cell on the copy."""
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        if not rows:
+            QMessageBox.information(
+                self, "Nothing selected",
+                "Select one or more rows first, then Duplicate selected.",
+            )
+            return
+
+        next_id = 0
+        for r in range(self.table.rowCount()):
+            try:
+                next_id = max(next_id, int(self._row_cell_text(r, COL_ID)) + 1)
+            except ValueError:
+                pass
+
+        new_rows: list[int] = []
+        for r in rows:
+            enabled_item = self.table.item(r, COL_ENABLED)
+            enabled = enabled_item.checkState() == Qt.Checked if enabled_item else True
+            try:
+                port = int(self._row_cell_text(r, COL_PORT) or "22")
+            except ValueError:
+                port = 22
+            node = HardwareNode(
+                node_id=next_id,
+                host=self._row_cell_text(r, COL_HOST),
+                enabled=enabled,
+                user=self._row_cell_text(r, COL_USER) or "root",
+                port=port,
+                password=self._row_cell_text(r, COL_PASSWORD),
+                remote_binary=self._row_cell_text(r, COL_REMOTE_BINARY) or "/opt/voting/node",
+                remote_config=self._row_cell_text(r, COL_REMOTE_CONFIG) or "/opt/voting/node.toml",
+                remote_log_dir=self._row_cell_text(r, COL_REMOTE_LOG_DIR) or "/opt/voting/logs",
+                start_cmd=self._row_cell_text(r, COL_START_CMD)
+                or "nohup {bin} --config {cfg} --log-dir {log_dir} > {log} 2>&1 < /dev/null & disown",
+                stop_cmd=self._row_cell_text(r, COL_STOP_CMD) or "pkill -f {bin} || true",
+            )
+            self._add_row(node)
+            new_rows.append(self.table.rowCount() - 1)
+            next_id += 1
+
+        # Select the new row(s) and jump straight to the Host cell of
+        # the first one -- the one field duplicating this way is
+        # actually meant to leave different.
+        self.table.clearSelection()
+        for r in new_rows:
+            self.table.selectRow(r)
+        self.table.setCurrentCell(new_rows[0], COL_HOST)
+        self.table.scrollToItem(self.table.item(new_rows[0], COL_HOST))
+
+    def _collect_with_rows(self) -> list[tuple[int, HardwareNode]]:
+        """Same filtering as collect(), but keeps each node's actual
+        table row alongside it. collect() alone loses that mapping
+        whenever a row is skipped (invalid id/port, empty host) --
+        callers that need to write something back to a specific row
+        (e.g. _probe_all's status column) must use this instead, or
+        every row after the first skipped one gets the wrong result."""
+        out: list[tuple[int, HardwareNode]] = []
         for r in range(self.table.rowCount()):
             try:
                 nid = int(self.table.item(r, COL_ID).text())
@@ -178,7 +250,7 @@ class HardwareNodesDialog(QDialog):
                 continue
             enabled_item = self.table.item(r, COL_ENABLED)
             enabled = enabled_item.checkState() == Qt.Checked if enabled_item else True
-            out.append(HardwareNode(
+            out.append((r, HardwareNode(
                 node_id=nid,
                 host=host,
                 enabled=enabled,
@@ -190,15 +262,23 @@ class HardwareNodesDialog(QDialog):
                 remote_log_dir=self.table.item(r, COL_REMOTE_LOG_DIR).text() or "/opt/voting/logs",
                 start_cmd=self.table.item(r, COL_START_CMD).text() or "nohup {bin} --config {cfg} --log-dir {log_dir} > {log} 2>&1 < /dev/null & disown",
                 stop_cmd=self.table.item(r, COL_STOP_CMD).text() or "pkill -f {bin} || true",
-            ))
+            )))
         return out
 
-    def _probe_all(self) -> None:
-        nodes = self.collect()
-        for i, n in enumerate(nodes):
-            self._set_status(i, "probing…", "muted")
+    def collect(self) -> list[HardwareNode]:
+        return [n for _row, n in self._collect_with_rows()]
 
-            def worker(row=i, node=n):
+    def _probe_all(self) -> None:
+        # BUG (fixed): this used to enumerate() self.collect()'s
+        # filtered list and use that 0..N index as the table row to
+        # write "probing…"/"reachable"/... into. collect() silently
+        # skips rows with an empty host or a non-numeric id/port, so
+        # as soon as any row before the end was skipped, every
+        # subsequent probe result landed on the wrong table row.
+        for row, n in self._collect_with_rows():
+            self._set_status(row, "probing…", "muted")
+
+            def worker(row=row, node=n):
                 ok, msg = check_reachable(node)
                 self._probe_result.emit(row, ok, msg)
 

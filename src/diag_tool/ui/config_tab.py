@@ -15,11 +15,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -92,12 +90,13 @@ class ConfigTab(QWidget):
         self.cycle_ms = QSpinBox(); self.cycle_ms.setRange(1, 10000); self.cycle_ms.setValue(20); self.cycle_ms.setSuffix(" ms")
         self.probation = QSpinBox(); self.probation.setRange(1, 10000); self.probation.setValue(10)
         self.init_sync_timeout = QSpinBox(); self.init_sync_timeout.setRange(1, 600_000)
-        self.init_sync_timeout.setValue(2000); self.init_sync_timeout.setSuffix(" ms")
+        self.init_sync_timeout.setValue(15_000); self.init_sync_timeout.setSuffix(" ms")
         self.init_sync_timeout.setToolTip(
             "How long a node waits at startup for its peers before giving "
-            "up. Real hardware often needs this much higher than the 2000 ms "
-            "default -- nodes power up at different times and boot slower "
-            "than a local/simulated run."
+            "up. Defaults to 15000 ms -- real hardware needs headroom here "
+            "since nodes power up at different times and boot slower than "
+            "a local/simulated run; lower it for quick simulated configs "
+            "if you want faster startup in tests."
         )
         pf.addRow("nominal", self.nominal)
         pf.addRow("minimum", self.minimum)

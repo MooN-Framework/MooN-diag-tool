@@ -103,6 +103,17 @@ class MainWindow(QMainWindow):
         # Wire the Bus into the tabs
         self.bus.op_frame_batch.connect(self.logging_tab.on_op_frame_batch)
         self.bus.diag_telegram.connect(self.logging_tab.on_diag_telegram)
+        # Reactive settings: every tab that derives UI state from
+        # AppSettings (mode label, target-node dropdown, hardware
+        # build fields, ...) re-syncs on ANY apply, not just its own --
+        # this is what makes switching simulated/hardware mode (via
+        # Settings' Apply or via re-enabling nodes in a "Configure
+        # hardware nodes…" dialog) take effect everywhere immediately,
+        # without restarting the app.
+        self.bus.settings_changed.connect(self.test_tab.on_settings_changed)
+        self.bus.settings_changed.connect(self.timing_tab.on_settings_changed)
+        self.bus.settings_changed.connect(self.package_tab.on_settings_changed)
+        self.bus.settings_changed.connect(self.settings_tab.on_settings_changed)
 
         # Bring up the listeners
         self._connect_all()
@@ -162,6 +173,12 @@ class MainWindow(QMainWindow):
         if was_active:
             self.session_logger.start()
         self._connect_all()
+        # Broadcast AFTER self.settings is updated and reconnected, so
+        # every tab's on_settings_changed (all read settings via the
+        # same lambda: self.settings closure passed at construction)
+        # sees the new values immediately, not the ones from before
+        # this apply.
+        self.bus.settings_changed.emit(new_settings)
 
     # ---- callbacks from core (worker threads!) ---------------------------
 

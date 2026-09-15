@@ -4,7 +4,6 @@ operational, stops them on exit from the context manager.
 """
 from __future__ import annotations
 
-import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path

@@ -9,7 +9,7 @@ Expected:  The target sends a tampered BrakeResult over multiple
            they see it as Lost and continue running in 2-node
            operation.
 
-Key point (what sets this apart from T6):
+Key point (what sets this apart from T06):
     The CORRUPTED node must not be allowed to take the whole cluster
     down with a GoFailsafe broadcast. Under the old semantics
     (own_dissented → Fault → Failsafe), the remaining two nodes would
@@ -19,7 +19,7 @@ Key point (what sets this apart from T6):
     available; the dissenter quietly goes into isolation.
 
 Assertions:
-    1. Nodes 0 and 1 mark the target as Lost (the existing T6
+    1. Nodes 0 and 1 mark the target as Lost (the existing T06
        assertion -- a precondition for the injection taking effect).
     2. Nodes 0 and 1 keep running for multiple cycles (current_seq
        grows) -- the cluster isn't dead via PeerBroadcast.

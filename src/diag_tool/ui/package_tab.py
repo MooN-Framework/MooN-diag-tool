@@ -112,12 +112,12 @@ class PackageTab(QWidget):
         self.minimum = QSpinBox(); self.minimum.setRange(1, 16); self.minimum.setValue(2)
         self.cycle_ms = QSpinBox(); self.cycle_ms.setRange(1, 1000); self.cycle_ms.setValue(20)
         self.init_sync_timeout = QSpinBox(); self.init_sync_timeout.setRange(1, 600_000)
-        self.init_sync_timeout.setValue(2000); self.init_sync_timeout.setSuffix(" ms")
+        self.init_sync_timeout.setValue(15_000); self.init_sync_timeout.setSuffix(" ms")
         self.init_sync_timeout.setToolTip(
             "How long a node waits at startup for its peers before giving "
-            "up. Real hardware often needs this much higher than the 2000 ms "
-            "default -- nodes power up at different times and boot slower "
-            "than a local/simulated run."
+            "up. Defaults to 15000 ms here since this tab targets real "
+            "hardware -- nodes power up at different times and boot "
+            "slower than a local/simulated run."
         )
         self.diag_group = QLineEdit(s.diag_group)
         self.diag_port = QSpinBox(); self.diag_port.setRange(1, 65535); self.diag_port.setValue(s.diag_port)
@@ -280,6 +280,14 @@ class PackageTab(QWidget):
             self._save_settings(new)
             self._append_line(f"[nodes] saved {len(updated)} hardware node(s)")
             self._refresh_node_combo()
+
+    def on_settings_changed(self, _settings) -> None:
+        """Connected to Bus.settings_changed in main_window -- fires on
+        every settings apply, not just this tab's own hardware-nodes
+        dialog save. Without this, editing hardware nodes from the
+        Test or Timing tab left this tab's target-node dropdown stale
+        until something in this tab happened to refresh it."""
+        self._refresh_node_combo()
 
     # ---- build ---------------------------------------------------------
 

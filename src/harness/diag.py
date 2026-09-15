@@ -15,7 +15,7 @@ import select
 import socket
 import struct
 import time
-from typing import Any, Optional
+from typing import Optional
 
 KNOWN_INJECTION_CMDS: frozenset[str] = frozenset({
     # Frame drops

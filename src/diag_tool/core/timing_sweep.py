@@ -21,7 +21,6 @@ live. `cancel()` interrupts the sweep at the next iteration boundary.
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import threading
 import time
@@ -36,7 +35,6 @@ from .ssh_deploy import (
     ensure_remote_dirs,
     is_process_running,
     scp_bytes,
-    scp_file,
     ssh_exec,
     stop_moon_node_service,
     tail_remote_logs,
@@ -50,6 +48,17 @@ from harness.config_gen import make_spec, render_config, render_toml_str
 def render_config_to_str(spec) -> str:
     """Backwards-compatible alias for the SCP-to-hardware path."""
     return render_toml_str(spec)
+
+
+class SweepAbort(RuntimeError):
+    """A failure that will hit every candidate identically.
+
+    A wrong argv, a binary the OS refuses to exec, a config the node
+    rejects outright: retrying the next cycle_ms cannot change any of
+    these, it only produces the same error N more times and buries the
+    first (and only useful) message. The candidate loop treats this as
+    "stop the sweep" rather than "this candidate failed".
+    """
 
 
 VERDICT_STABLE = "STABLE"
@@ -108,6 +117,17 @@ class TimingSweep:
         self.on_done = on_done
         self._cancel = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Set as soon as any node ever replies on the diag channel. Used
+        # to tell "the system is too slow at this cycle_ms" apart from
+        # "there is no diag channel to talk to at all" -- see the hint
+        # emitted on VERDICT_NO_OP.
+        self._any_node_answered = False
+        # Instance-level, not a class attribute: a mutable default on the
+        # class is shared by every TimingSweep ever constructed, so a
+        # second sweep in the same GUI session would inherit the first
+        # one's (already terminated) Popen objects if _sim_stop ran
+        # before _sim_start.
+        self._local_procs: list[subprocess.Popen] = []
 
     def cancel(self) -> None:
         self._cancel.set()
@@ -128,6 +148,19 @@ class TimingSweep:
                 self.on_line(f"\n=== candidate cycle_duration_ms = {cycle_ms} ===")
                 try:
                     res = self._run_candidate(cycle_ms)
+                except SweepAbort as e:
+                    self.on_result(CandidateResult(
+                        cycle_ms=cycle_ms, operational=False,
+                        still_healthy_after_wait=False, verdict=VERDICT_EXCEPTION,
+                        detail=str(e),
+                    ))
+                    self.on_line(f"[abort] {e}")
+                    self.on_line(
+                        "[abort] stopping the sweep: this failure is "
+                        "independent of the cycle duration, so the remaining "
+                        "candidates would fail identically"
+                    )
+                    break
                 except Exception as e:  # never let a candidate crash the sweep
                     res = CandidateResult(
                         cycle_ms=cycle_ms, operational=False,
@@ -163,13 +196,38 @@ class TimingSweep:
 
                 if not operational:
                     self._log_node_tails(cycle_ms)
+                    if not self._any_node_answered:
+                        # Not one node ever replied on the diag channel.
+                        # That is almost never a timing problem: a node
+                        # built without the "diagnostic" feature comes up
+                        # and runs perfectly well, it just has no diag
+                        # channel to answer on. Name that explicitly --
+                        # the bare timeout message sent people looking at
+                        # cycle durations for a build-flag problem.
+                        self.on_line(
+                            "[hint] no node answered on the diag channel at all "
+                            f"({self.p.diag_group}:{self.p.diag_port} via "
+                            f"{self.p.interface_ip}). Usual cause: the binary "
+                            "was built WITHOUT the 'diagnostic' feature, so the "
+                            "channel does not exist. Check Settings > Build > "
+                            "Features, then tick 'Force rebuild' and start the "
+                            "sweep again. Other causes: wrong interface IP, or "
+                            "multicast blocked on that interface."
+                        )
                     return CandidateResult(
                         cycle_ms=cycle_ms, operational=False,
                         still_healthy_after_wait=False, verdict=VERDICT_NO_OP,
-                        detail=(f"only {len(expected_ids)} nodes expected, "
-                                f"not all reached operational in "
-                                f"{self.p.setup_timeout_s}s "
-                                f"(see log for node stdout tails)"),
+                        detail=(
+                            "no node answered on the diag channel -- see the "
+                            "hint in the log, this is usually a missing "
+                            "'diagnostic' build feature rather than a timing "
+                            "limit"
+                            if not self._any_node_answered else
+                            f"only {len(expected_ids)} nodes expected, "
+                            f"not all reached operational in "
+                            f"{self.p.setup_timeout_s}s "
+                            f"(see log for node stdout tails)"
+                        ),
                     )
 
                 # --- 3. wait, doing nothing -------------------------------
@@ -303,6 +361,7 @@ class TimingSweep:
             for nid, st in results.items():
                 if st is None:
                     continue
+                self._any_node_answered = True
                 state = st.get("node_state", "")
                 if state and state not in NOT_YET_UP_STATES:
                     ready.add(nid)
@@ -323,14 +382,17 @@ class TimingSweep:
 
     # ---- simulated mode --------------------------------------------------
 
-    _local_procs: list[subprocess.Popen] = []
-
     def _sim_start(self, cycle_ms: int) -> None:
         if self.p.local_binary is None or self.p.local_work_dir is None:
             raise RuntimeError("simulated mode requires local_binary and local_work_dir")
         cand_dir = self.p.local_work_dir / f"cycle_{cycle_ms}ms"
         cfg_dir = cand_dir / "configs"; cfg_dir.mkdir(parents=True, exist_ok=True)
         log_dir = cand_dir / "logs"; log_dir.mkdir(parents=True, exist_ok=True)
+        # The node writes its own session log via --log-dir. Keep that
+        # out of `logs/`, whose node_*.log files are the stdout capture
+        # that _log_node_tails globs -- otherwise every tail would show
+        # up twice, once from stdout and once from the session file.
+        session_dir = cand_dir / "sessions"; session_dir.mkdir(parents=True, exist_ok=True)
 
         self._local_procs = []
         for own_id in range(self.p.nominal):
@@ -349,13 +411,24 @@ class TimingSweep:
             cfg_path = render_config(spec, cfg_dir / f"node_{own_id}.toml")
             log_path = log_dir / f"node_{own_id}.log"
             log_fh = log_path.open("w")
-            # Mirror what the harness (harness/node.py) does: the binary
-            # takes a "node" subcommand and reads its config via --config.
+            # Exactly the argv the harness uses (harness/node.py): the
+            # binary takes --config directly, there is no subcommand.
+            # This used to pass a leading "node" argument, which every
+            # node rejected with "unknown argument: node" and an exit
+            # before it had opened a single socket. Nothing looked at
+            # the processes afterwards, so the sweep spent the full
+            # setup timeout polling a diag channel that belonged to
+            # three already-dead processes. Keep this in step with
+            # harness/node.py if the node CLI ever changes.
             # RUST_LOG/NO_COLOR match the harness defaults.
             env = os.environ.copy()
             env.setdefault("RUST_LOG", "info")
             env["NO_COLOR"] = "1"
-            cmd = [str(self.p.local_binary), "node", "--config", str(cfg_path)]
+            cmd = [
+                str(self.p.local_binary),
+                "--config", str(cfg_path),
+                "--log-dir", str(session_dir),
+            ]
             p = subprocess.Popen(
                 cmd, env=env,
                 stdout=log_fh, stderr=subprocess.STDOUT,
@@ -365,6 +438,35 @@ class TimingSweep:
             f"spawned {len(self._local_procs)} local nodes "
             f"(cfg={cfg_dir}, logs={log_dir})"
         )
+
+        # Fail fast on a node that never got off the ground. A bad argv,
+        # a config the node rejects or a missing shared library kills the
+        # process in milliseconds, and without this check the sweep went
+        # on to wait out the whole setup timeout per candidate before
+        # showing the reason. Half a second is far more than the node
+        # needs to reject its arguments and far less than it needs to
+        # become operational, so a process still alive here failed for
+        # some other reason and is left to the normal timeout path.
+        time.sleep(0.5)
+        stillborn = [
+            own_id for own_id, proc in enumerate(self._local_procs)
+            if proc.poll() is not None
+        ]
+        if stillborn:
+            codes = ", ".join(
+                f"node {own_id} exit={self._local_procs[own_id].returncode}"
+                for own_id in stillborn
+            )
+            self.on_line(
+                f"[error] {len(stillborn)} of {len(self._local_procs)} node "
+                f"processes exited immediately after spawn ({codes}). "
+                f"The argv was: {' '.join(cmd)}"
+            )
+            self._log_node_tails(cycle_ms)
+            raise SweepAbort(
+                f"local node processes did not start: {codes}. "
+                "See the tail above for the reason the binary gave."
+            )
 
     def _sim_stop(self) -> None:
         for p in self._local_procs:
@@ -415,7 +517,7 @@ class TimingSweep:
                 diag_group=self.p.diag_group,
                 diag_port=self.p.diag_port,
                 interface=self.p.node_interface,  # e.g. "eth0" -- the node's own interface, not this machine's
-                init_sync_timeout_ms=15_000,  # real hardware needs more headroom than the 2000ms default
+                init_sync_timeout_ms=15_000,  # matches the new NodeSpec/make_spec default, kept explicit for clarity here
             )
             toml_text = render_config_to_str(spec)
             self.on_line(f"[{hn.host}] deploying config → {hn.remote_config}")

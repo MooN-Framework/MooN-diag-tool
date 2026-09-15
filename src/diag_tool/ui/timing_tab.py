@@ -2,10 +2,17 @@
 Timing tab.
 
 Three vertical sections:
-  1. Cross-compile & deploy panel (Rust target triple, cargo build,
-     deploy binary via SCP to all hardware nodes).
-  2. Sweep parameters (candidates, nominal/minimum, stability wait).
-  3. Live results table with colour-coded verdicts.
+  1. Sweep parameters (candidates, nominal/minimum, stability wait) +
+     sweep/deploy controls.
+  2. Live results table with colour-coded verdicts.
+  3. Build/deploy/sweep log.
+
+Cross-compile settings (target triple, binary name, features) live in
+the Settings tab now, not here -- this tab only reads them. There's
+also no standalone "build" action left in this tab: both "Deploy to
+all hardware nodes" and "Start sweep" already build a missing binary
+on demand (see _build_and_push_binary / predeploy_and_build_params),
+so a separate manual build button was pure redundancy.
 
 Finds the smallest candidate cycle_ms the full system still stays
 healthy at: bring the candidate up, wait `stability_wait_s` doing
@@ -29,6 +36,7 @@ from typing import Optional
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -48,6 +56,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.cross_compile import CrossBuild
+from ..core.mode import derive_mode
 from ..core.ssh_deploy import (
     HardwareNode,
     SshError,
@@ -84,8 +93,6 @@ VERDICT_COLORS = {
 
 
 class TimingTab(QWidget):
-    _build_line = Signal(str)
-    _build_done = Signal(int, object)
     _sweep_line = Signal(str)
     _sweep_result = Signal(object)
     _sweep_done = Signal(object)
@@ -98,19 +105,15 @@ class TimingTab(QWidget):
         """
         settings_provider() -> current AppSettings
         settings_saver(new_settings) -> persists changes (used for the
-            hardware node list, target triple etc.)
+            hardware node list)
         """
         super().__init__(parent)
         self._get_settings = settings_provider
         self._save_settings = settings_saver
         self._sweep: Optional[TimingSweep] = None
-        self._build_helper: Optional[CrossBuild] = None
-        self._built_binary_path: Optional[Path] = None
 
         self._build_ui()
 
-        self._build_line.connect(self._append_build_line)
-        self._build_done.connect(self._on_build_done)
         self._sweep_line.connect(self._append_sweep_line)
         self._sweep_result.connect(self._append_result_row)
         self._sweep_done.connect(self._on_sweep_done)
@@ -122,7 +125,6 @@ class TimingTab(QWidget):
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 20, 20, 20); outer.setSpacing(14)
-        s = self._get_settings()
 
         # Header
         head = QHBoxLayout()
@@ -142,37 +144,16 @@ class TimingTab(QWidget):
         split = QSplitter(Qt.Vertical)
         split.setChildrenCollapsible(False)
 
-        # ---- Top: build + deploy + params ----
+        # ---- Top: params + controls ----
         top = QWidget()
         tl = QVBoxLayout(top); tl.setContentsMargins(0, 0, 0, 0); tl.setSpacing(12)
 
-        # Cross-compile / deploy row
-        cd_row = QHBoxLayout(); cd_row.setSpacing(12)
-
-        build_box = QGroupBox("Cross-compile")
-        bf = QFormLayout(build_box); bf.setContentsMargins(12, 18, 12, 12); bf.setSpacing(8)
-        self.target_triple = QLineEdit(s.target_triple)
-        self.target_triple.setPlaceholderText(
-            "e.g. aarch64-unknown-linux-gnu (empty = host build via cargo, "
-            "set = cross-compile via `cross`)"
-        )
-        self.binary_name = QLineEdit(s.binary_name)
-        self.build_features = QLineEdit(s.build_features)
-        self.build_features.setPlaceholderText("comma-separated, e.g. diagnostic")
-        bf.addRow("Target triple", self.target_triple)
-        bf.addRow("Binary name", self.binary_name)
-        bf.addRow("Features", self.build_features)
-        bf_btns = QHBoxLayout()
-        self.build_btn = QPushButton("cargo build --release")
-        self.build_btn.setProperty("accent", True)
-        self.build_btn.clicked.connect(self._on_build)
-        self.deploy_btn = QPushButton("Deploy to all hardware nodes")
-        self.deploy_btn.clicked.connect(self._on_deploy)
-        bf_btns.addWidget(self.build_btn); bf_btns.addWidget(self.deploy_btn)
-        bf.addRow(bf_btns)
-        cd_row.addWidget(build_box, 2)
-
-        # Sweep params
+        # Sweep params -- capped to a fraction of the row width (plus a
+        # trailing stretch) rather than left to fill it on its own, so
+        # the form doesn't stretch its labels/fields absurdly wide on
+        # an ultra-wide window now that it's no longer sharing this row
+        # with the (now-removed) Cross-compile box.
+        params_row = QHBoxLayout(); params_row.setSpacing(12)
         pbox = QGroupBox("Sweep parameters")
         pf = QFormLayout(pbox); pf.setContentsMargins(12, 18, 12, 12); pf.setSpacing(8)
         self.candidates = QLineEdit("20,15,12,10,8,6")
@@ -196,9 +177,9 @@ class TimingTab(QWidget):
         pf.addRow("minimum", self.minimum)
         pf.addRow("stability wait", self.stability_wait_s)
         pf.addRow("operational timeout", self.setup_timeout_s)
-        cd_row.addWidget(pbox, 2)
-
-        tl.addLayout(cd_row)
+        params_row.addWidget(pbox, 2)
+        params_row.addStretch(1)
+        tl.addLayout(params_row)
 
         # Sweep control row
         ctl = QHBoxLayout()
@@ -209,8 +190,27 @@ class TimingTab(QWidget):
         self.cancel_btn.setProperty("danger", True)
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self._on_cancel_sweep)
+        # Nothing on disk records which cargo features an existing
+        # binary was built with, so "the file is there" is not the same
+        # as "the file is usable". This is the manual override for that:
+        # a stale build without the diagnostic feature produces nodes
+        # that run fine and never answer on the diag channel, and the
+        # only way out used to be deleting the file by hand.
+        self.force_rebuild = QCheckBox("Force rebuild")
+        self.force_rebuild.setToolTip(
+            "Rebuild the node binary even if one already exists at the "
+            "expected path. Use this after changing Settings > Build > "
+            "Features, or whenever the sweep reports that no node "
+            "answered on the diag channel."
+        )
+        # Builds a missing binary itself before pushing (see
+        # _build_and_push_binary) -- no separate "build" step needed.
+        self.deploy_btn = QPushButton("Deploy to all hardware nodes")
+        self.deploy_btn.clicked.connect(self._on_deploy)
         self.smallest_lbl = QLabel(""); self.smallest_lbl.setProperty("muted", True)
         ctl.addWidget(self.start_btn); ctl.addWidget(self.cancel_btn)
+        ctl.addWidget(self.deploy_btn)
+        ctl.addWidget(self.force_rebuild)
         ctl.addWidget(self.smallest_lbl); ctl.addStretch(1)
         tl.addLayout(ctl)
 
@@ -250,14 +250,9 @@ class TimingTab(QWidget):
     # ---- mode toggle ------------------------------------------------------
 
     def _current_mode(self) -> str:
-        """s.test_mode "auto" (default): derived from whether at least
-        one hardware node is both configured and enabled. "simulated"/
-        "hardware": forced regardless of what's configured -- see
-        Settings tab."""
-        s = self._get_settings()
-        if s.test_mode in ("simulated", "hardware"):
-            return s.test_mode
-        return "hardware" if enabled_nodes(nodes_from_json(s.hardware_nodes_json)) else "simulated"
+        """See core.mode.derive_mode -- shared with the Test and
+        Settings tabs so all three agree on what mode is active."""
+        return derive_mode(self._get_settings())
 
     def _sync_mode_ui(self) -> None:
         is_hw = self._current_mode() == "hardware"
@@ -277,6 +272,16 @@ class TimingTab(QWidget):
         else:
             self.nominal.setToolTip("")
 
+    def on_settings_changed(self, _settings) -> None:
+        """Connected to Bus.settings_changed in main_window -- fires on
+        every settings apply, from this tab's own hardware-nodes
+        dialog, the Test/Package tab's, or the Settings tab's Apply
+        button (which is now the only place target_triple/binary_name/
+        build_features are edited). Keeps the mode label and derived
+        nominal here in sync without needing a full app restart or a
+        manual click in this tab."""
+        self._sync_mode_ui()
+
     # ---- hardware nodes dialog -------------------------------------------
 
     def _open_nodes_dialog(self) -> None:
@@ -291,47 +296,6 @@ class TimingTab(QWidget):
             self._append_build_line(f"[nodes] saved {len(updated)} hardware node(s)")
             self._sync_mode_ui()
 
-    # ---- cross-compile ---------------------------------------------------
-
-    def _on_build(self) -> None:
-        s = self._get_settings()
-        if not s.rust_repo_path:
-            QMessageBox.warning(self, "No repo",
-                                "Set 'Rust repository' in Settings first.")
-            return
-        # persist current build fields
-        from dataclasses import replace
-        self._save_settings(replace(
-            s,
-            target_triple=self.target_triple.text().strip(),
-            binary_name=self.binary_name.text().strip() or "node",
-            build_features=self.build_features.text().strip(),
-        ))
-        s = self._get_settings()
-
-        features = [f.strip() for f in s.build_features.split(",") if f.strip()]
-        self._build_helper = CrossBuild(
-            repo_path=Path(s.rust_repo_path),
-            target_triple=s.target_triple,
-            features=features,
-            binary_name=s.binary_name,
-        )
-        self.build_btn.setEnabled(False)
-        self.build_btn.setText("Building…")
-        self._built_binary_path = None
-        self.log.clear()
-
-        self._build_helper.start(
-            on_line=lambda ln: self._build_line.emit(ln),
-            on_done=lambda rc, path: self._build_done.emit(rc, path),
-        )
-
-    @Slot(int, object)
-    def _on_build_done(self, rc: int, path: Optional[Path]) -> None:
-        self.build_btn.setEnabled(True)
-        self.build_btn.setText("cargo build --release")
-        self._built_binary_path = path
-
     # ---- deploy binary to hardware ---------------------------------------
 
     def _on_deploy(self) -> None:
@@ -345,6 +309,16 @@ class TimingTab(QWidget):
             QMessageBox.warning(self, "No repo",
                                 "Set 'Rust repository' in Settings first.")
             return
+        if not s.target_triple:
+            self._append_build_line(
+                "[deploy] WARNING: no target triple set (Settings → Build "
+                "(hardware mode)) -- building a host binary, which won't "
+                "run on the hardware nodes' architecture unless it "
+                "happens to match this machine's."
+            )
+
+        # Read on the GUI thread; the worker below must not touch widgets.
+        force_rebuild = self.force_rebuild.isChecked()
 
         self.deploy_btn.setEnabled(False)
         self.deploy_btn.setText("Deploying…")
@@ -353,7 +327,9 @@ class TimingTab(QWidget):
 
         def worker() -> None:
             try:
-                bin_path = self._build_and_push_binary(nodes, s, self._deploy_line.emit)
+                bin_path = self._build_and_push_binary(
+                    nodes, s, force_rebuild, self._deploy_line.emit,
+                )
                 self._deploy_done.emit(bin_path is not None)
             except Exception as e:
                 # Safety net: an unhandled exception (anything other
@@ -367,7 +343,8 @@ class TimingTab(QWidget):
         threading.Thread(target=worker, name="deploy", daemon=True).start()
 
     def _build_and_push_binary(self, nodes: list[HardwareNode], s,
-                                emit_line) -> Optional[Path]:
+                               force_rebuild: bool,
+                               emit_line) -> Optional[Path]:
         """Ensure a built binary exists locally (building with `cross` +
         the configured features if it's missing) and push it to every
         node in `nodes`. Returns the local binary path on success, None
@@ -383,25 +360,30 @@ class TimingTab(QWidget):
             features=features,
             binary_name=s.binary_name or "node",
         )
-        # Prefer the binary from the last in-tab build if it's still
-        # there; otherwise build it now instead of just complaining
-        # it's missing -- with the configured features (defaults to
+        # No standalone "build" button/action anymore -- always check
+        # the expected on-disk path first, building fresh only if it's
+        # missing (with the configured features, defaults to
         # "diagnostic", required for the JSON diag channel).
-        bin_path = self._built_binary_path
-        if bin_path is None or not bin_path.exists():
-            expected = helper.expected_binary_path()
-            if expected.exists():
-                bin_path = expected
-            else:
-                emit_line(
-                    f"[deploy] no binary at {expected} -- building first "
-                    f"(features={s.build_features!r})..."
-                )
-                rc, built = self._blocking_build(helper)
-                if rc != 0 or built is None:
-                    emit_line("[deploy] aborted: build failed")
-                    return None
-                bin_path = built
+        expected = helper.expected_binary_path()
+        if expected.exists() and not force_rebuild:
+            bin_path = expected
+            emit_line(
+                f"[deploy] reusing existing binary at {expected} "
+                f"(expected features={s.build_features!r}; tick "
+                "'Force rebuild' to build it again)"
+            )
+        else:
+            why = ("rebuild forced" if expected.exists()
+                   else f"no binary at {expected}")
+            emit_line(
+                f"[deploy] {why} -- building first "
+                f"(features={s.build_features!r})..."
+            )
+            rc, built = self._blocking_build(helper)
+            if rc != 0 or built is None:
+                emit_line("[deploy] aborted: build failed")
+                return None
+            bin_path = built
 
         emit_line(f"[deploy] source: {bin_path}")
         ok_all = True
@@ -479,6 +461,8 @@ class TimingTab(QWidget):
             return
 
         mode = self._current_mode()
+        # Read on the GUI thread: the worker below must not touch widgets.
+        force_rebuild = self.force_rebuild.isChecked()
         hw_nodes: list[HardwareNode] = []
         if mode == "hardware":
             hw_nodes = enabled_nodes(nodes_from_json(s.hardware_nodes_json))
@@ -510,15 +494,33 @@ class TimingTab(QWidget):
         def predeploy_and_build_params() -> None:
             try:
                 if mode == "simulated":
+                    # The configured features MUST be passed here too,
+                    # not just on the hardware path. The sweep drives
+                    # every node exclusively over the JSON diag channel
+                    # (_wait_operational and _probe_states both call
+                    # get_status), and that channel only exists when the
+                    # binary was built with the "diagnostic" feature.
+                    # Built without it, the nodes come up perfectly fine
+                    # and simply never answer, so every candidate came
+                    # back NO_OPERATIONAL with nothing in the log
+                    # pointing at the cause.
+                    features = [
+                        f.strip() for f in (s.build_features or "").split(",")
+                        if f.strip()
+                    ]
                     helper = CrossBuild(
                         repo_path=Path(s.rust_repo_path),
                         target_triple="",  # host build for simulated
+                        features=features,
                         binary_name=s.binary_name or "node",
                     )
                     bin_path = helper.expected_binary_path()
-                    if not bin_path.exists():
+                    if force_rebuild or not bin_path.exists():
+                        why = ("rebuild forced" if bin_path.exists()
+                               else f"host binary missing at {bin_path}")
                         self._sweep_line.emit(
-                            f"[build] host binary missing at {bin_path} -- building..."
+                            f"[build] {why} -- "
+                            f"building (features={s.build_features!r})..."
                         )
                         rc, built = self._blocking_build(helper)
                         if rc != 0 or built is None:
@@ -526,6 +528,16 @@ class TimingTab(QWidget):
                             self._predeploy_failed.emit()
                             return
                         bin_path = built
+                    else:
+                        # An existing binary is reused as-is, and nothing
+                        # on disk records which features it was built
+                        # with. Say so, so a stale non-diagnostic build
+                        # is at least visible in the log.
+                        self._sweep_line.emit(
+                            f"[build] reusing existing host binary at {bin_path} "
+                            f"(expected features={s.build_features!r}; tick "
+                            "'Force rebuild' to build it again)"
+                        )
                     work_dir = Path(s.session_log_dir) / "timing_sweep"
                     work_dir.mkdir(parents=True, exist_ok=True)
                     params = SweepParams(
@@ -541,7 +553,9 @@ class TimingTab(QWidget):
                         local_work_dir=work_dir,
                     )
                 else:
-                    bin_path = self._build_and_push_binary(hw_nodes, s, self._sweep_line.emit)
+                    bin_path = self._build_and_push_binary(
+                        hw_nodes, s, force_rebuild, self._sweep_line.emit,
+                    )
                     if bin_path is None:
                         self._predeploy_failed.emit()
                         return

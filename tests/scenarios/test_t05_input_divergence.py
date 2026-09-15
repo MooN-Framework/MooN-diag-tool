@@ -1,5 +1,5 @@
 """
-T5 — Input divergence.
+T05 — Input divergence.
 
 Setup:     3 stable nodes, all with the same input.
 Injection: set-input-single <target> with a strongly deviating value.

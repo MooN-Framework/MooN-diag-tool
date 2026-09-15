@@ -30,6 +30,16 @@ from harness.fabric import Fabric, FabricOptions
 
 TARGET = 0
 
+# Picked up by diag_tool.core.scenario_meta so the GUI can grey this
+# scenario out before a hardware run instead of offering it and then
+# reporting a skip. The runtime guard below stays as a second line of
+# defence for hand-run pytest invocations.
+HW_UNSUPPORTED = (
+    "needs MOON_INJECT_SELFTEST_FAIL in the node's environment, which "
+    "would have to be baked into start_cmd -- deployment-specific, out "
+    "of scope for the delivery package"
+)
+
 
 def _make_selftest_fail_fabric(binary, work_dir) -> Fabric:
     opts = FabricOptions(

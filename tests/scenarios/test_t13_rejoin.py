@@ -30,9 +30,12 @@ def test_rejoin(fabric_3):
 
     # 4a. Readmit event in the observer's log (Lost -> Probation).
     #     Log-based because the probation window at default timings
-    #     (10 cycles * 20 ms = 200 ms) is shorter than
-    #     wait_peer_health's polling interval, so it isn't reliably
-    #     visible via GetStatus.
+    #     (10 cycles * 20 ms = 200 ms) is only about two of
+    #     wait_peer_health's polling attempts wide. The nominal pause
+    #     is 100 ms, but each attempt additionally costs a GetStatus
+    #     round trip (1.0 s timeout), so the effective resolution is
+    #     both larger than 100 ms and not bounded from above. Catching
+    #     a 200 ms window with it is a coin flip, so we don't try.
     observer_node = fabric_3.nodes[OBSERVER]
     assert observer_node.wait_for_log(
         rf"peer readmitted.*peer_id={TARGET}", timeout=15.0

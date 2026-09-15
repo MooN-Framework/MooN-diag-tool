@@ -1,5 +1,5 @@
 """
-T7 — CRC divergence (updated).
+T07 — CRC divergence (updated).
 
 Setup:     3 stable nodes.
 Injection: fake-crc <target> 1.

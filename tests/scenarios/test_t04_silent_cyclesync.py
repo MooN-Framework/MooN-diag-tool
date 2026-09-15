@@ -1,5 +1,5 @@
 """
-T4 — Silent in CycleSync.
+T04 — Silent in CycleSync.
 
 Setup:     3 stable nodes (fabric_3).
 Injection: drop_cyclesync <target> 1 (the target suppresses its own

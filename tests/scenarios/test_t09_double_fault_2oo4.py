@@ -1,5 +1,5 @@
 """
-T9 — Simultaneous double failure in 2oo4.
+T09 — Simultaneous double failure in 2oo4.
 
 Setup:     4 stable nodes (fabric_4).
 Injection: shutdown of 2 nodes in quick succession (effectively

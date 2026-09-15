@@ -1,7 +1,7 @@
 """
-T3 — Silent before input.
+T03 — Silent before input.
 
-Like T1, except the target swallows its own input entirely instead of
+Like T01, except the target swallows its own input entirely instead of
 its results and acks. The peers time out in ShareInputs, enter EM and
 exclude it; the target follows via the rendezvous and goes to
 Isolation. The remaining two carry on in 2-node operation.
@@ -19,7 +19,7 @@ Why this is no longer a triple failsafe:
     exclusion proposals against itself, recognises them via
     `self_excluded_by_peers` and goes to Isolation. Same detection,
     same exclusion, but the healthy pair survives -- the availability
-    that 2oo3 exists for. Compare T7 and T25, which have had these
+    that 2oo3 exists for. Compare T07 and T25, which have had these
     semantics for the divergence cases all along.
 """
 from harness.assertions import (

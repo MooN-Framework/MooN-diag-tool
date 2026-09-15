@@ -58,6 +58,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.cross_compile import CrossBuild
+from ..core.mode import derive_mode
 from ..core.os_open import OpenError, open_path
 from ..core.scenario_meta import ScenarioMeta, analyze_scenarios, infeasible_reason
 from ..core.ssh_deploy import (
@@ -307,14 +308,9 @@ class TestTab(QWidget):
     # ---- mode toggle / hardware nodes -------------------------------------
 
     def _current_mode(self) -> str:
-        """s.test_mode "auto" (default): derived from whether at least
-        one hardware node is both configured and enabled. "simulated"/
-        "hardware": forced regardless of what's configured -- see
-        Settings tab."""
-        s = self._get_settings()
-        if s.test_mode in ("simulated", "hardware"):
-            return s.test_mode
-        return "hardware" if enabled_nodes(nodes_from_json(s.hardware_nodes_json)) else "simulated"
+        """See core.mode.derive_mode -- shared with the Timing and
+        Settings tabs so all three agree on what mode is active."""
+        return derive_mode(self._get_settings())
 
     def _sync_mode_ui(self) -> None:
         is_hw = self._current_mode() == "hardware"
@@ -323,6 +319,17 @@ class TestTab(QWidget):
         self._refresh_hw_summary()
         if self.scenarios_list.count():
             self._reload_scenarios()
+
+    def on_settings_changed(self, _settings) -> None:
+        """Connected to Bus.settings_changed in main_window -- fires on
+        EVERY settings apply, whichever tab triggered it (Settings
+        tab's Apply button, or a hardware-nodes dialog save in this
+        tab, the Timing tab, or the Package tab). Without this, only
+        this tab's own dialog save refreshed its mode label/hw
+        summary -- switching to hardware mode elsewhere left this tab
+        showing a stale "Mode: simulated" until something in it
+        happened to be clicked."""
+        self._sync_mode_ui()
 
     def _refresh_hw_summary(self) -> None:
         s = self._get_settings()
@@ -837,7 +844,7 @@ class TestTab(QWidget):
                 fabric_group=s.op_group, fabric_port=s.op_port,
                 diag_group=s.diag_group, diag_port=s.diag_port,
                 interface=s.node_network_interface,
-                init_sync_timeout_ms=15_000,  # real hardware needs more headroom than the 2000ms default
+                init_sync_timeout_ms=15_000,  # matches the new NodeSpec/make_spec default, kept explicit for clarity here
             )
             toml_text = render_toml_str(spec)
             # Kill any already-running instance of the harness's own

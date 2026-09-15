@@ -29,7 +29,6 @@ it gives 5 ms.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 from .operational_listener import OperationalListener
 from .wire_decoder import DecodedFrame

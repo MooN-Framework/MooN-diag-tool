@@ -128,6 +128,16 @@ def decode_frame(data: bytes) -> DecodedFrame:
             node_state_name="?", timestamp_ns=0, discriminator=0,
             discriminator_name="?", total_size=len(data),
             error=f"frame too short ({len(data)} bytes)",
+            # crc_ok defaults to True on DecodedFrame, which is wrong
+            # here: we never got far enough to check the CRC at all.
+            # Downstream code (main_window._on_op_frame,
+            # timing_measure._on_frame) treats crc_ok as "safe to feed
+            # into the registry / timing stats" and does NOT also
+            # check `error` in every place -- leaving this at the
+            # default let a too-short/garbage UDP packet on the
+            # operational port masquerade as a verified frame from
+            # node_id=0 with all-zero fields.
+            crc_ok=False,
         )
 
     try:
@@ -140,6 +150,7 @@ def decode_frame(data: bytes) -> DecodedFrame:
             node_state_name="?", timestamp_ns=0, discriminator=0,
             discriminator_name="?", total_size=len(data),
             error=f"header unpack: {e}",
+            crc_ok=False,  # see the "frame too short" branch above -- same reasoning
         )
 
     body_end = len(data) - CRC_LEN

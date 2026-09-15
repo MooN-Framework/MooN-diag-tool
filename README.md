@@ -14,7 +14,7 @@ pytest-based test framework for the MooN voting system.
 │   ├── diag_tool/         # PySide6 GUI package
 │   └── harness/           # reusable test harness (Fabric, Node, DiagClient, ...)
 ├── tests/
-│   ├── scenarios/         # scenario tests (test_t01 .. test_t39)
+│   ├── scenarios/         # scenario tests (test_t01 .. test_t38)
 │   └── timing_analysis/   # standalone timing study
 ```
 
@@ -242,13 +242,20 @@ scenario that actually wants a node to go down and come back.
 
 ## Test scenario coverage
 
-`tests/scenarios/` contains 39 scenarios (`test_t01`…`test_t39`)
+`tests/scenarios/` contains 38 scenarios (`test_t01`…`test_t38`)
 covering fault injection, timeout edges, quorum limits, rejoin/
 probation handling, and the PeerInError rendezvous mechanism against
 the MooN voting framework, exercised in both 2oo3 and 2oo4
 configurations. Each scenario file's docstring
 documents its setup, the injected fault, and the expected framework
 behaviour in detail.
+
+There is no `T39`: it injected the same single forged EM header as
+`T38` with the same assertions and differed only in whether the
+docstring called it an accident or an attack, so the two could
+disagree on pure timing within one run. They are merged into `T38`,
+which now repeats the injection and reports how many attempts the
+fabric survives. IDs are not renumbered, so the gap is deliberate.
 
 A handful of scenarios (`T30`–`T34`) are marked `pytest.mark.skip`:
 they target timeout edges that turned out not to be reliably,
@@ -259,4 +266,17 @@ see the individual docstrings. `T14` is skipped for a similar reason
 (needs a dedicated Rust-side frame-delay injection). These are
 intentionally left in the suite as documented open points rather than
 deleted, since running the suite still surfaces them as skipped
-(not silently absent).
+(not silently absent). Each of the six defines a real test function
+under its module-level skip, so pytest collects and reports it
+instead of exiting 5 on a file with zero items.
+
+`T17` and `T22` cannot run against hardware and say so declaratively
+via a module-level `HW_UNSUPPORTED = "<reason>"` constant, which
+`scenario_meta` reads (with `ast`, without importing the module) so
+the Test tab can grey them out before a run. Both keep their runtime
+`pytest.skip` as a fallback for hand-run pytest invocations.
+
+The timing study under `tests/timing_analysis/` is excluded from a
+normal run by `addopts = -m "not timing"` in `pytest.ini`. Run it
+explicitly with `pytest -m timing`. The `slow` marker is NOT
+deselected automatically; use `pytest -m "not slow"` for a fast run.
