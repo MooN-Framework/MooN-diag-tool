@@ -47,6 +47,16 @@ Test assertions:
     documentation claimed all three, so the recovery and no-exclusion
     properties were described but never actually verified.
 
+Relation to the no-progress watchdog:
+    Every rendezvous round is a cycle without a decision, and the
+    framework goes failsafe after MAX_ROUNDS_WITHOUT_DECISION (5) such
+    rounds in a row. Each round consumes at least six forged frames
+    (every collect phase sends at least twice, and one rendezvous cycle
+    of the target spans ShareInputs, ErrorManagement and CycleSync), so
+    FAKE_FRAMES = 20 forces at most four consecutive rounds. Raising
+    FAKE_FRAMES far enough to reach five rounds turns this scenario
+    into a persistent spoof, which is expected to end in failsafe.
+
 Relation to T35:
     T35 injects the same fault with 5 instead of 20 frames and
     asserts the state-machine edge (which of the four rendezvous
@@ -61,10 +71,10 @@ OBSERVERS = (0, 1)
 FAKE_FRAMES = 20
 RENDEZVOUS_TIMEOUT_S = 6.0
 
-# 20 forged frames at the default 20 ms cycle take ~400 ms to be
-# consumed. Wait comfortably past that before checking for recovery,
-# so the "fabric is healthy again" assertions do not race the tail of
-# the injection.
+# 20 forged frames are consumed within at most four cycles, i.e. well
+# under 100 ms at the default 20 ms cycle. Wait comfortably past that
+# before checking for recovery, so the "fabric is healthy again"
+# assertions do not race the tail of the injection.
 DRAIN_S = 3.0
 SURVIVOR_CYCLES = 10
 

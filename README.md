@@ -14,7 +14,7 @@ pytest-based test framework for the MooN voting system.
 │   ├── diag_tool/         # PySide6 GUI package
 │   └── harness/           # reusable test harness (Fabric, Node, DiagClient, ...)
 ├── tests/
-│   ├── scenarios/         # scenario tests (test_t01 .. test_t38)
+│   ├── scenarios/         # scenario tests (test_t01 .. test_t40)
 │   └── timing_analysis/   # standalone timing study
 ```
 
