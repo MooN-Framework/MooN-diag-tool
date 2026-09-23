@@ -34,6 +34,7 @@ from .ssh_deploy import (
     SshError,
     ensure_remote_dirs,
     is_process_running,
+    remote_log_dir_report,
     scp_bytes,
     ssh_exec,
     stop_moon_node_service,
@@ -530,19 +531,26 @@ class TimingSweep:
             time.sleep(0.3)  # let the old process actually exit before the new one rebinds its sockets
             self.on_line(f"[{hn.host}] starting")
             try:
-                ssh_exec(hn, hn.resolved_start_cmd(), timeout=30.0)
+                start_out = ssh_exec(hn, hn.resolved_start_cmd(), timeout=30.0)
             except SshError as e:
                 raise RuntimeError(
                     f"[{hn.host}] start_cmd failed: {e.output}"
                 ) from e
+            if start_out.strip():
+                # See ensure_remote_dirs(): a failed redirect in the
+                # backgrounded job only shows up here, with rc 0.
+                self.on_line(f"[{hn.host}] start_cmd output: {start_out.strip()}")
             # start_cmd exiting 0 only proves the shell backgrounded
             # something -- not that it's still alive. Verify for real.
             time.sleep(0.5)
             if not is_process_running(hn):
                 tail = tail_remote_logs(hn)
+                env_info = remote_log_dir_report(hn)
                 raise RuntimeError(
                     f"[{hn.host}] process not running after start_cmd "
                     f"(nohup/& exits 0 even on an immediate crash) -- "
+                    f"start_cmd output: {start_out.strip() or '(none)'}\n"
+                    f"--- remote user / log dir ---\n{env_info}\n"
                     f"log tail:\n{tail}"
                 )
 

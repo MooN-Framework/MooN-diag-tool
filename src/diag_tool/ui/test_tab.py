@@ -69,6 +69,7 @@ from ..core.ssh_deploy import (
     is_process_running,
     nodes_from_json,
     nodes_to_json,
+    remote_log_dir_report,
     scp_bytes,
     scp_file,
     scp_get,
@@ -872,19 +873,28 @@ class TestTab(QWidget):
                 return False
             self.line_received.emit(f"[deploy] {hn.host} starting")
             try:
-                ssh_exec(hn, hn.resolved_start_cmd(), timeout=30.0)
+                start_out = ssh_exec(hn, hn.resolved_start_cmd(), timeout=30.0)
             except SshError as e:
                 self.line_received.emit(f"[deploy] {hn.host} FAILED (start): {e.output}")
                 return False
+            if start_out.strip():
+                # A failed redirect inside the backgrounded job (e.g. log
+                # dir not writable) is only reported on stderr: the shell
+                # itself still exits 0 because `disown` succeeds.
+                self.line_received.emit(
+                    f"[deploy] {hn.host} start_cmd output: {start_out.strip()}"
+                )
             # start_cmd exiting 0 only proves the shell backgrounded
             # something -- not that it's still alive. Verify for real.
             time.sleep(0.5)
             if not is_process_running(hn):
                 tail = tail_remote_logs(hn)
+                env_info = remote_log_dir_report(hn)
                 self.line_received.emit(
                     f"[deploy] {hn.host} FAILED: process not running after "
                     f"start_cmd (nohup/& exits 0 even on an immediate "
-                    f"crash) -- log tail:\n{tail}"
+                    f"crash) -- start_cmd output: {start_out.strip() or '(none)'}\n"
+                    f"--- remote user / log dir ---\n{env_info}\n{tail}"
                 )
                 return False
         return True

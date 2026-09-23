@@ -71,7 +71,10 @@ class HardwareNode:
     # start_cmd="systemctl restart voting-node",
     # stop_cmd="systemctl stop voting-node || true".
     start_cmd: str = "nohup {bin} --config {cfg} --log-dir {log_dir} > {log} 2>&1 < /dev/null & disown"
-    stop_cmd: str = "pkill -f {bin} || true"
+    stop_cmd: str = "pkill -f '^{bin}' || true"  # anchored: an unanchored
+                                                  # pattern also matches the remote
+                                                  # `bash -c "pkill -f ..."` shell
+                                                  # itself and kills it (rc 255)
 
     @property
     def remote_log(self) -> str:
@@ -431,28 +434,55 @@ def tail_remote_logs(node: HardwareNode, lines: int = 20, timeout: float = 15.0)
     )
 
 
+def remote_log_dir_report(node: HardwareNode, timeout: float = 15.0) -> str:
+    """`id` plus `ls -la` of remote_log_dir -- for explaining a failed
+    start: a log dir the SSH user can't write to makes start_cmd's
+    redirect fail before the binary is ever executed, which neither
+    log tail can show (neither file gets written)."""
+    cmd = f"id; ls -la {shlex.quote(node.remote_log_dir)} 2>&1"
+    try:
+        return ssh_exec(node, cmd, timeout=timeout).rstrip()
+    except SshError as e:
+        return f"(could not inspect log dir: {e.output})"
+
+
 def ensure_remote_dirs(node: HardwareNode, timeout: float = 15.0) -> None:
     """mkdir -p the parent directories of remote_binary/remote_config/
-    remote_log/remote_log_dir before scp'ing into them.
+    remote_log/remote_log_dir and make sure the SSH user can write to them.
 
     scp (the legacy protocol this module shells out to) can NOT create
     missing destination directories -- it just fails with a generic
     "dest open ... Failure" if the parent doesn't exist. This matters
-    especially when remote_binary/remote_config point somewhere on a
-    tmpfs mount (e.g. /opt/moon, writable but starting empty on every
-    boot) rather than a path that's guaranteed to already exist: the
-    subdirectory (e.g. /opt/moon/bin) is normally only created by
-    moon-pkg-load.service when it extracts a package, so on a boot
-    where that hasn't happened (or won't, because the harness is
-    deliberately bypassing the package flow) it simply isn't there yet.
+    especially on the MooN images, where /opt/moon is a tmpfs that starts
+    empty on every boot: subdirectories like /opt/moon/bin are normally
+    only created by moon-pkg-load.service when it extracts a package.
+
+    Ownership matters as well: moon-pkg-load.service and moon-node.service
+    run as root, so a directory one of them created earlier (typically
+    the production service's own --log-dir) is not writable for a
+    non-root SSH user. start_cmd's `> {log}` redirect then fails inside
+    the backgrounded job while the shell itself still exits 0 (`disown`
+    succeeds), so the node binary is silently never executed and the
+    only visible symptom is "process not running after start_cmd".
+    Take ownership via passwordless sudo and verify writability
+    explicitly, so this surfaces here as a clear error instead. Root can
+    still write to the chowned directories, so the production service
+    is unaffected.
     """
-    dirs = {
+    dirs = " ".join(sorted({
         shlex.quote(str(Path(node.remote_binary).parent)),
         shlex.quote(str(Path(node.remote_config).parent)),
         shlex.quote(str(Path(node.remote_log).parent)),
         shlex.quote(node.remote_log_dir),
-    }
-    ssh_exec(node, "mkdir -p " + " ".join(sorted(dirs)), timeout=timeout)
+    }))
+    cmd = f"mkdir -p {dirs} 2>/dev/null || sudo -n mkdir -p {dirs}; "
+    if node.user != "root":
+        cmd += f'sudo -n chown "$(id -u):$(id -g)" {dirs} 2>/dev/null; '
+    cmd += (
+        f'for d in {dirs}; do test -w "$d" || '
+        f'{{ echo "not writable for $(id -un): $d"; ls -ld "$d"; exit 1; }}; done'
+    )
+    ssh_exec(node, cmd, timeout=timeout)
 
 
 def check_reachable(node: HardwareNode) -> tuple[bool, str]:

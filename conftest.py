@@ -210,7 +210,12 @@ class _HardwareFabric:
             pass  # best-effort, matches simulated Fabric.restart_node's "kill if still alive"
         time.sleep(0.3)  # let the old process actually exit before rebinding its sockets
         print(f"[restart] node {node_id} ({rn.hw.host}): starting", flush=True)
-        ssh_exec(rn.hw, rn.hw.resolved_start_cmd(), timeout=15.0)
+        start_out = ssh_exec(rn.hw, rn.hw.resolved_start_cmd(), timeout=15.0)
+        if start_out.strip():
+            # A failed redirect in the backgrounded job is only visible
+            # here (rc stays 0), see ssh_deploy.ensure_remote_dirs().
+            print(f"[restart] node {node_id} ({rn.hw.host}): start_cmd output: "
+                  f"{start_out.strip()}", flush=True)
         _ = wait_operational  # reserved, mirrors the simulated Fabric
 
     def wait_operational(self, timeout: float = 15.0, after: Optional[dict[int, int]] = None) -> bool:
