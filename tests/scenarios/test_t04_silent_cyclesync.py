@@ -47,7 +47,8 @@ def test_silent_cyclesync(fabric_3):
     # The target is excluded and isolates itself instead of failing safe.
     target_status = wait_node_state(fabric_3, TARGET, "Isolation", timeout=10.0)
     assert target_status is not None, (
-        f"target {TARGET} should end up in Isolation, not Failsafe"
+        f"target {TARGET} did not report Isolation within 10 s "
+        "(actual node states: see 'fabric state at failure' below)"
     )
 
     # The survivors see it as Lost and keep cycling.

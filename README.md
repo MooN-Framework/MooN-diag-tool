@@ -242,6 +242,34 @@ can kill it. Nodes saved with the old unanchored default
 `pkill -f {bin} || true` are auto-repaired to the anchored form by
 `resolved_stop_cmd()`.
 
+### Probation window on hardware
+
+Hardware deploys write `probation_cycles` from the Test tab's
+"Probation cycles" field (default 100) instead of the framework default
+of 10 used in simulation. Measured on the Pi cluster, 10 cycles closed
+the probation window ~130 ms after a readmit, while the harness needs
+~300 ms from seeing the readmit in the SSH-tailed log to an acked diag
+command. T20 and T21 need to act inside that window. T20 reports
+`PRECONDITION NOT MET` with the measured numbers when it missed it.
+
+### Diagnosing and measuring hardware failures
+
+- Every failing test that uses `fabric_3`/`fabric_4` gets a
+  `fabric state at failure` section (conftest hook, via
+  `harness.assertions.describe_node`): node_state or "no answer",
+  failsafe reason, peer healths, recent FSM transitions and the last
+  relevant log lines of every node. Collected before teardown, so a
+  hardware failure stays explainable after the next restart.
+- Timeout-coverage scenarios T26 to T29 accept the deadline on any
+  observer (`first_node_logging`). Which observer's own deadline fires
+  first depends on node scheduling (microseconds apart in simulation,
+  milliseconds on the Pis), the first node into EM takes the others
+  along.
+- "Repeat each scenario (hardware)" in the Test tab runs every selected
+  scenario N times and prints a pass rate per scenario. For the forged
+  EM header family (T16, T38, T40) and anything else hitting the EM
+  attribution race, a rate is the meaningful result, not a single run.
+
 ### Fixture teardown
 
 `_HardwareFabric.stop_all()` (called on every `fabric_3`/`fabric_4`

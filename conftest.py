@@ -428,3 +428,32 @@ def fabric_4(request, binary, work_dir):
         yield f
         f.stop_all()
 
+
+
+# ---- failure diagnostics ---------------------------------------------
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """On every failing test that uses a fabric, attach the actual state
+    of every node (harness.assertions.describe_node: node_state, failsafe
+    reason, peer healths, recent transitions, relevant log lines) as an
+    extra report section. Runs in the call phase, i.e. before fixture
+    teardown, while the nodes can still be queried.
+
+    Without this, an assertion like "observer 0 did not mark node 2 as
+    Lost" cannot tell a missed exclusion from a false exclusion of the
+    observer itself, and a flaky hardware failure is gone for good once
+    the next test restarts the fabric."""
+    outcome = yield
+    rep = outcome.get_result()
+    if rep.when != "call" or not rep.failed:
+        return
+    fabric = item.funcargs.get("fabric_3") or item.funcargs.get("fabric_4")
+    if fabric is None or getattr(fabric, "diag", None) is None:
+        return
+    from harness.assertions import describe_node
+    try:
+        text = "\n".join(describe_node(fabric, nid) for nid in sorted(fabric.nodes))
+    except Exception as e:  # diagnostics must never mask the real failure
+        text = f"(could not collect fabric state: {type(e).__name__}: {e})"
+    rep.sections.append(("fabric state at failure", text))

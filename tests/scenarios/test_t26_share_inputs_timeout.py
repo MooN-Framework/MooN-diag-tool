@@ -31,20 +31,23 @@ gets excluded, does the majority survive) instead of the edge.
 Coverage:  (ShareInputs, ShareInputsTimeout | PeerInError)
            → ErrorManagement
 """
-from harness.assertions import assert_transition_sequence_present
+from harness.assertions import assert_transition_sequence_present, first_node_logging
 
 TARGET = 2
-OBSERVER = 0
 
 
 def test_share_inputs_timeout(fabric_3):
     assert fabric_3.diag.drop_inputs(TARGET, count=3) is not None
 
-    node = fabric_3.nodes[OBSERVER]
-    assert node.wait_for_log(
-        r'phase deadline exceeded phase="share_inputs"',
-        timeout=6.0,
-    ), "the observer should log a share_inputs timeout"
+    # Any observer: which one's own deadline fires first depends on
+    # node scheduling, see harness.assertions.first_node_logging.
+    observer = first_node_logging(
+        fabric_3, [n for n in sorted(fabric_3.nodes) if n != TARGET],
+        r'phase deadline exceeded phase="share_inputs"', timeout=6.0,
+    )
+    assert observer is not None, "no observer logged a share_inputs timeout"
+    print(f"\n[T26] share_inputs deadline taken by observer {observer}", flush=True)
+    node = fabric_3.nodes[observer]
 
     assert node.wait_for_log(
         r"transition from=ShareInputs event=(ShareInputsTimeout|PeerInError) to=ErrorManagement",
@@ -56,7 +59,7 @@ def test_share_inputs_timeout(fabric_3):
     )
 
     _ = assert_transition_sequence_present(
-        fabric_3, OBSERVER,
+        fabric_3, observer,
         [("ShareInputs", "ShareInputsTimeout", "ErrorManagement")],
         timeout=1.5,
     )

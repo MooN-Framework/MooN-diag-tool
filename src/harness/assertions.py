@@ -206,3 +206,68 @@ def assert_transition_sequence_present(
                 return True
         # No sleep -- poll aggressively.
     return False
+
+
+_DIAG_LOG_MARKERS = (
+    "transition from=", "failsafe entered", "peer excluded",
+    "isolat", "exclusion", "deadline exceeded",
+)
+
+
+def describe_node(fabric: Fabric, node_id: int, log_lines: int = 12) -> str:
+    """Human-readable snapshot of what a node is actually doing, for
+    assertion messages. A failed wait_node_state() only says "not in
+    state X"; this says which state it IS in (or that it no longer
+    answers), its last failsafe reason, its recent FSM transitions and
+    the last relevant lines of its own log. Works for simulated and
+    hardware nodes alike."""
+    out: list[str] = [f"--- node {node_id} ---"]
+    status = fabric.diag.get_status(node_id, timeout=1.5) if fabric.diag else None
+    if status is None:
+        out.append("GetStatus: no answer (process exited, e.g. after Failsafe)")
+    else:
+        out.append(
+            f"GetStatus: node_state={status.get('node_state')} "
+            f"last_failsafe_reason={status.get('last_failsafe_reason')} "
+            f"current_seq={status.get('current_seq')}"
+        )
+        peers = ", ".join(f"{p.get('id')}:{p.get('health')}" for p in status.get("peers", []))
+        if peers:
+            out.append(f"peers: {peers}")
+        trans = status.get("recent_transitions", [])[-8:]
+        if trans:
+            out.append("recent_transitions: " + " | ".join(
+                f"{t.get('from')} -{t.get('event')}-> {t.get('to')}" for t in trans
+            ))
+    node = fabric.nodes.get(node_id)
+    if node is not None:
+        relevant = [ln for ln in node.log_lines
+                    if any(m in ln.lower() for m in _DIAG_LOG_MARKERS)]
+        if relevant:
+            out.append(f"last {min(log_lines, len(relevant))} relevant log lines:")
+            out.extend("  " + ln for ln in relevant[-log_lines:])
+    return "\n".join(out)
+
+
+def first_node_logging(
+    fabric: Fabric, node_ids, pattern: str, timeout: float = 6.0,
+) -> Optional[int]:
+    """Id of the first node in `node_ids` whose log matches `pattern`
+    within `timeout`, else None.
+
+    For timeout-coverage scenarios: a dropped frame makes EVERY observer
+    wait for it, but which observer's own deadline fires first is a
+    matter of how far apart the nodes run. In simulation they are
+    microseconds apart, on the Pi cluster milliseconds, and the first
+    node into EM can take the others along before their own deadline
+    fires. Pinning the assertion to one fixed observer therefore tests
+    node scheduling, not the edge. Asking "did any observer take it"
+    tests the edge."""
+    deadline = time.monotonic() + timeout
+    while True:
+        for nid in node_ids:
+            if fabric.nodes[nid].wait_for_log(pattern, timeout=0):
+                return nid
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.05)

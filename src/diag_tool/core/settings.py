@@ -46,6 +46,14 @@ class AppSettings:
     target_triple: str = ""           # empty = host triple
     binary_name: str = "node"
     build_features: str = "diagnostic"  # required for the JSON diag channel
+    # probation_cycles baked into the config of HARDWARE test deploys
+    # (Test tab). Simulation keeps the NodeSpec default (10). On the Pis
+    # the harness needs ~300 ms from seeing a readmit in the SSH-tailed
+    # log to getting a diag command acked, while 10 cycles closed the
+    # probation window after ~130 ms, so probation-timing scenarios
+    # (T20, T21) never hit the window. Deliberate, visible deviation
+    # from the simulated config, see test_t20's docstring.
+    hw_probation_cycles: int = 100
     # Hardware nodes: JSON-encoded list of HardwareNode dicts.
     hardware_nodes_json: str = "[]"
     # MooN package building (Package tab) -- see tools/build-moon-package.sh

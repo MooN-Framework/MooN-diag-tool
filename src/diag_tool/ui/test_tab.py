@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QTextEdit,
     QVBoxLayout,
@@ -236,6 +237,20 @@ class TestTab(QWidget):
             "then (re)start it, before launching pytest."
         )
         hw_row.addWidget(self.deploy_chk)
+        self.probation_lbl = QLabel("Probation cycles:")
+        hw_row.addWidget(self.probation_lbl)
+        self.probation_spin = QSpinBox()
+        self.probation_spin.setRange(1, 10_000)
+        self.probation_spin.setValue(self._get_settings().hw_probation_cycles)
+        self.probation_spin.setToolTip(
+            "probation_cycles written into the node config on hardware "
+            "deploys (simulation always uses the framework default of 10). "
+            "The harness observes the nodes through SSH-tailed logs and "
+            "needs ~300 ms to react to a readmit, so the default window "
+            "is too short for probation-timing scenarios (T20, T21). "
+            "Takes effect with the next deploy."
+        )
+        hw_row.addWidget(self.probation_spin)
         outer.addLayout(hw_row)
 
         split = QSplitter(Qt.Vertical)
@@ -266,6 +281,23 @@ class TestTab(QWidget):
         self.env_edit.setPlaceholderText("PYTEST_XDIST_AUTO_NUM_WORKERS=1")
         self.env_edit.setFixedHeight(80)
         cl.addWidget(self.env_edit)
+
+        rep_row = QHBoxLayout()
+        self.repeat_lbl = QLabel("Repeat each scenario (hardware):")
+        rep_row.addWidget(self.repeat_lbl)
+        self.repeat_spin = QSpinBox()
+        self.repeat_spin.setRange(1, 100)
+        self.repeat_spin.setValue(1)
+        self.repeat_spin.setToolTip(
+            "Run every selected scenario N times in a row (each run with "
+            "its own fresh fabric restart) and report a pass rate per "
+            "scenario. Timing-sensitive scenarios (e.g. T16, T38, T40) do "
+            "not pass or fail deterministically on real hardware, a rate "
+            "over N runs is the meaningful result for them."
+        )
+        rep_row.addWidget(self.repeat_spin)
+        rep_row.addStretch(1)
+        cl.addLayout(rep_row)
 
         btn_row = QHBoxLayout()
         self.run_btn = QPushButton("Start")
@@ -318,6 +350,10 @@ class TestTab(QWidget):
         is_hw = self._current_mode() == "hardware"
         self.mode_label.setText(f"Mode: {self._current_mode()}")
         self.deploy_chk.setEnabled(is_hw)
+        self.probation_lbl.setEnabled(is_hw)
+        self.probation_spin.setEnabled(is_hw)
+        self.repeat_lbl.setEnabled(is_hw)
+        self.repeat_spin.setEnabled(is_hw)
         self._refresh_hw_summary()
         if self.scenarios_list.count():
             self._reload_scenarios()
@@ -474,6 +510,12 @@ class TestTab(QWidget):
 
     def _on_run(self) -> None:
         s = self._get_settings()
+        # Persisted here rather than on every spinbox tick: a settings
+        # save broadcasts settings_changed, which reloads the scenario
+        # list.
+        if self.probation_spin.value() != s.hw_probation_cycles:
+            s = replace(s, hw_probation_cycles=self.probation_spin.value())
+            self._save_settings(s)
         d = self._scenarios_dir()
         if d is None:
             QMessageBox.warning(self, "No directory",
@@ -623,6 +665,7 @@ class TestTab(QWidget):
             self._append_line(f"[skip] {msg}")
 
         deploy_first = mode == "hardware" and self.deploy_chk.isChecked()
+        self._repeat_n = self.repeat_spin.value() if mode == "hardware" else 1
 
         self._cancel_batch = False
         self.run_btn.setEnabled(False)
@@ -721,15 +764,18 @@ class TestTab(QWidget):
         # bulletproof: no way for one scenario's leftover state (an
         # isolated node, an altered session_id, module-level caching)
         # to bleed into the next one.
-        total = len(scenarios)
+        repeat = max(1, getattr(self, "_repeat_n", 1))
+        jobs = [(p, r) for p in scenarios for r in range(1, repeat + 1)]
+        total = len(jobs)
         results: list[tuple[str, int]] = []  # (scenario name, exit code)
-        for i, scenario_path in enumerate(scenarios, start=1):
+        for i, (scenario_path, rep) in enumerate(jobs, start=1):
             if self._cancel_batch:
                 self.line_received.emit("\n[cancelled] stopping before next scenario")
                 break
 
             name = Path(scenario_path).name
-            self.line_received.emit(f"\n=== [{i}/{total}] {name} ===")
+            rep_tag = f" (run {rep}/{repeat})" if repeat > 1 else ""
+            self.line_received.emit(f"\n=== [{i}/{total}] {name}{rep_tag} ===")
             cmd = base_cmd + [scenario_path]
             self.line_received.emit(f"$ (cwd={repo_root}) " + " ".join(shlex.quote(c) for c in cmd))
             try:
@@ -769,7 +815,28 @@ class TestTab(QWidget):
             self.line_received.emit(f"  FAILED {name} (exit={rc})")
         for name, rc in no_tests:
             self.line_received.emit(f"  NO TESTS {name} (exit={rc})")
+        if repeat > 1:
+            self._emit_pass_rates(results)
         self.line_received.emit("__RUN_DONE__")
+
+    def _emit_pass_rates(self, results: list[tuple[str, int]]) -> None:
+        """Per-scenario pass rate over the repeated runs. Runs without
+        tests (rc 5) are left out of the denominator."""
+        per: dict[str, list[int]] = {}
+        for name, rc in results:
+            per.setdefault(name, []).append(rc)
+        self.line_received.emit("\n=== pass rate per scenario ===")
+        width = max(len(n) for n in per)
+        for name, rcs in per.items():
+            counted = [rc for rc in rcs if rc != 5]
+            if not counted:
+                self.line_received.emit(f"  {name:<{width}}  no tests")
+                continue
+            ok = sum(1 for rc in counted if rc == 0)
+            self.line_received.emit(
+                f"  {name:<{width}}  {ok:>3}/{len(counted):<3} "
+                f"({100 * ok / len(counted):5.1f} %)"
+            )
 
     def _run_single_pytest_invocation(self, base_cmd: list[str], scenarios: list[str],
                                        repo_root: Path, env: dict) -> None:
@@ -867,9 +934,13 @@ class TestTab(QWidget):
                 diag_group=s.diag_group, diag_port=s.diag_port,
                 interface=s.node_network_interface,
                 init_sync_timeout_ms=15_000,  # matches the new NodeSpec/make_spec default, kept explicit for clarity here
+                probation_cycles=s.hw_probation_cycles,  # HW-only, see AppSettings.hw_probation_cycles
             )
             toml_text = render_toml_str(spec)
-            self.line_received.emit(f"[deploy] {hn.host} → config {hn.remote_config}")
+            self.line_received.emit(
+                f"[deploy] {hn.host} → config {hn.remote_config} "
+                f"(probation_cycles={spec.probation_cycles})"
+            )
             try:
                 scp_bytes(hn, toml_text.encode(), hn.remote_config)
                 self.line_received.emit(f"[deploy] {hn.host} → binary {hn.remote_binary}")

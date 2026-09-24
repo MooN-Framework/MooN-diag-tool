@@ -130,8 +130,8 @@ def test_wrong_phase_header(fabric_3):
             fabric_3, observer, n_cycles=SURVIVOR_CYCLES, timeout=10.0,
         ), (
             f"observer {observer} did not advance {SURVIVOR_CYCLES} "
-            "cycles after the injection was exhausted -- it is likely "
-            "stuck in ErrorManagement"
+            "cycles after the injection was exhausted (actual node "
+            "states: see 'fabric state at failure' below)"
         )
 
         status = fabric_3.diag.get_status(observer, timeout=2.0)

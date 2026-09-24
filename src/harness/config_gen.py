@@ -548,6 +548,7 @@ def make_spec(
     interface: str = "lo",
     init_sync_timeout_ms: int = 15_000,
     send_interval_ms: int = 1,
+    probation_cycles: int | None = None,
 ) -> NodeSpec:
     """Build a NodeSpec with a timing section derived from cycle_ms.
 
@@ -557,8 +558,13 @@ def make_spec(
     (nodes powering up at different times, slower boot, etc.) -- unlike
     the in-cycle offsets, it isn't derived from cycle_ms so it's passed
     straight through rather than going via derive_timing().
+
+    probation_cycles: None keeps the NodeSpec default. Hardware runs
+    may need a wider window, see test_t20's docstring.
     """
     overrides = derive_timing(cycle_ms, send_interval_ms)
+    if probation_cycles is not None:
+        overrides["probation_cycles"] = probation_cycles
     base = NodeSpec(
         own_id=own_id, nominal=nominal, minimum=minimum,
         fabric_group=fabric_group, fabric_port=fabric_port,
