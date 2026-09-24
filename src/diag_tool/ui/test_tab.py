@@ -75,6 +75,7 @@ from ..core.ssh_deploy import (
     scp_get,
     scp_get_dir,
     ssh_exec,
+    stop_and_wait,
     stop_moon_node_service,
     tail_remote_logs,
     write_hw_nodes_file,
@@ -815,21 +816,32 @@ class TestTab(QWidget):
 
     def _deploy_to_hardware(self, nodes: list[HardwareNode], bin_path: Path, s) -> bool:
         """Push the built binary + a freshly rendered config to every
-        node, then (re)start it via its configured start_cmd. Same
-        push/stop/start sequence as TimingSweep._hw_start, generalised
-        for a plain test run instead of a cycle-duration sweep.
+        node, then start ALL nodes together and verify they came up.
 
-        Preparation phase first: stop moon-node.service on every node.
-        If this node was ever deployed to via the Package tab, that
-        systemd unit is still running the production binary from
-        /opt/moon/bin/node -- resolved_stop_cmd() below only pkill's
-        HardwareNode.remote_binary (default /opt/voting/node), a
-        different path, so without this the production binary keeps
-        running alongside the harness's test binary and both fight
-        over the same multicast group/port.
+        Two phases on purpose. Phase 1 takes every node down (verified)
+        and pushes to it, phase 2 starts all of them in parallel. The
+        old per-node stop/push/start sequence started node 0 while
+        nodes 1..N were still the previous run's processes (test
+        teardown leaves them running). Node 0 then saw a running fabric,
+        went into ResyncLostPeer as a returning peer, got no resync
+        frames from the stale peers ("non-resync frame in resync phase,
+        ignoring"), hit the resync deadline and went Failsafe
+        (LocalFault). The liveness check below then aborted the deploy.
+        This is why a SECOND run failed right at deploy while the first
+        one, on freshly booted nodes, worked.
+
+        Phase 1 also stops moon-node.service on every node: if a node
+        was ever deployed to via the Package tab, that systemd unit may
+        still run the production binary, fighting over the same
+        multicast group/port.
         """
+        from concurrent.futures import ThreadPoolExecutor
+
         nominal = len(nodes)
-        for hn in sorted(nodes, key=lambda n: n.node_id):
+        ordered = sorted(nodes, key=lambda n: n.node_id)
+
+        # ---- phase 1: every node down + pushed, before ANY starts ----
+        for hn in ordered:
             self.line_received.emit(f"[deploy] {hn.host} stopping moon-node.service (if present)")
             stop_moon_node_service(hn)
             warn = hn.validate_logging()
@@ -840,6 +852,15 @@ class TestTab(QWidget):
             except SshError as e:
                 self.line_received.emit(f"[deploy] {hn.host} FAILED (mkdir): {e.output}")
                 return False
+            # Must be really gone before scp overwrites the binary
+            # (ETXTBSY otherwise) and before phase 2 starts anything.
+            try:
+                out = stop_and_wait(hn)
+                if out:
+                    self.line_received.emit(f"[deploy] {hn.host} {out}")
+            except SshError as e:
+                self.line_received.emit(f"[deploy] {hn.host} FAILED (stop): {e.output or e}")
+                return False
             spec = make_spec(
                 own_id=hn.node_id, nominal=nominal, minimum=2, cycle_ms=20,
                 fabric_group=s.op_group, fabric_port=s.op_port,
@@ -848,21 +869,6 @@ class TestTab(QWidget):
                 init_sync_timeout_ms=15_000,  # matches the new NodeSpec/make_spec default, kept explicit for clarity here
             )
             toml_text = render_toml_str(spec)
-            # Kill any already-running instance of the harness's own
-            # process BEFORE pushing a new binary over it -- stop_moon_node_service()
-            # above only stops the systemd unit; a process this tool
-            # itself started earlier via nohup+exec (e.g. a previous Test
-            # tab or Timing tab run) is still running here otherwise, and
-            # scp trying to overwrite a currently-executing binary file
-            # fails with ETXTBSY ("text file busy"), which shows up as a
-            # generic "dest open ... Failure" -- easy to mistake for a
-            # missing-directory problem, it isn't one.
-            try:
-                ssh_exec(hn, hn.resolved_stop_cmd(), timeout=30.0)
-            except SshError as e:
-                self.line_received.emit(f"[deploy] {hn.host} stop_cmd failed (continuing): {e.output}")
-            time.sleep(0.3)  # let the old process actually exit before we try to overwrite its binary
-
             self.line_received.emit(f"[deploy] {hn.host} → config {hn.remote_config}")
             try:
                 scp_bytes(hn, toml_text.encode(), hn.remote_config)
@@ -871,12 +877,14 @@ class TestTab(QWidget):
             except SshError as e:
                 self.line_received.emit(f"[deploy] {hn.host} FAILED (transfer): {e.output}")
                 return False
+
+        # ---- phase 2: start all together, then verify each ----------
+        def start(hn: HardwareNode) -> Optional[str]:
             self.line_received.emit(f"[deploy] {hn.host} starting")
             try:
                 start_out = ssh_exec(hn, hn.resolved_start_cmd(), timeout=30.0)
             except SshError as e:
-                self.line_received.emit(f"[deploy] {hn.host} FAILED (start): {e.output}")
-                return False
+                return f"[deploy] {hn.host} FAILED (start): {e.output}"
             if start_out.strip():
                 # A failed redirect inside the backgrounded job (e.g. log
                 # dir not writable) is only reported on stderr: the shell
@@ -884,22 +892,29 @@ class TestTab(QWidget):
                 self.line_received.emit(
                     f"[deploy] {hn.host} start_cmd output: {start_out.strip()}"
                 )
+            return None
+
+        def verify(hn: HardwareNode) -> Optional[str]:
             # start_cmd exiting 0 only proves the shell backgrounded
             # something -- not that it's still alive. Verify for real.
-            time.sleep(0.5)
-            if not is_process_running(hn):
-                tail = tail_remote_logs(hn)
-                env_info = remote_log_dir_report(hn)
-                self.line_received.emit(
-                    f"[deploy] {hn.host} FAILED: process not running after "
-                    f"start_cmd (nohup/& exits 0 even on an immediate "
-                    f"crash) -- start_cmd output: {start_out.strip() or '(none)'}\n"
-                    f"--- remote user / log dir ---\n{env_info}\n{tail}"
-                )
-                return False
-        return True
+            if is_process_running(hn):
+                return None
+            return (
+                f"[deploy] {hn.host} FAILED: process not running after "
+                f"start_cmd (nohup/& exits 0 even on an immediate crash)\n"
+                f"--- remote user / log dir ---\n{remote_log_dir_report(hn)}\n"
+                f"{tail_remote_logs(hn)}"
+            )
 
-    @Slot(str)
+        with ThreadPoolExecutor(max_workers=len(ordered)) as ex:
+            errors = [e for e in ex.map(start, ordered) if e]
+            if not errors:
+                time.sleep(1.0)
+                errors = [e for e in ex.map(verify, ordered) if e]
+        for e in errors:
+            self.line_received.emit(e)
+        return not errors
+
     def _append_line(self, line: str) -> None:
         if line == "__RUN_DONE__":
             self.run_btn.setEnabled(True)

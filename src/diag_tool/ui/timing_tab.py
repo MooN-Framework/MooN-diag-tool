@@ -29,7 +29,6 @@ signals.
 from __future__ import annotations
 
 import threading
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -65,7 +64,7 @@ from ..core.ssh_deploy import (
     nodes_from_json,
     nodes_to_json,
     scp_file,
-    ssh_exec,
+    stop_and_wait,
     stop_moon_node_service,
 )
 from ..core.timing_sweep import (
@@ -407,10 +406,11 @@ class TimingTab(QWidget):
                 emit_line(f"[deploy] {hn.host} stopping moon-node.service (if present)")
                 stop_moon_node_service(hn)
                 try:
-                    ssh_exec(hn, hn.resolved_stop_cmd(), timeout=30.0)
+                    out = stop_and_wait(hn)
+                    if out:
+                        emit_line(f"[deploy] {hn.host} {out}")
                 except SshError as e:
-                    emit_line(f"[deploy] {hn.host} stop_cmd failed (continuing): {e.output}")
-                time.sleep(0.3)  # let the old process actually exit before we overwrite its binary
+                    emit_line(f"[deploy] {hn.host} stop failed (continuing): {e.output}")
                 ensure_remote_dirs(hn)
                 emit_line(f"[deploy] {hn.host} → {hn.remote_binary}")
                 scp_file(hn, bin_path, hn.remote_binary, timeout=120.0)

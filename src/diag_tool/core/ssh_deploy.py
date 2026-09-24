@@ -103,7 +103,17 @@ class HardwareNode:
         )
 
     def resolved_stop_cmd(self) -> str:
-        return self.stop_cmd.format(
+        cmd_template = self.stop_cmd
+        if " ".join(cmd_template.split()) in _LEGACY_STOP_CMDS:
+            # Auto-repair: nodes saved before the pattern was anchored
+            # keep the old `pkill -f {bin}` in their settings. Run via
+            # `ssh host "<cmd>"`, that pattern also matches the remote
+            # `bash -c "pkill -f /path/to/bin || true"` shell itself,
+            # which pkill then kills -> ssh rc 255 with empty output
+            # ("stop_cmd failed (continuing): "), while the node itself
+            # only got a SIGTERM nobody waited for.
+            cmd_template = HardwareNode.stop_cmd
+        return cmd_template.format(
             bin=self.remote_binary, cfg=self.remote_config,
             log=self.remote_log, log_dir=self.remote_log_dir,
         )
@@ -139,6 +149,15 @@ class HardwareNode:
                 f"never be written. Fix start_cmd in \"Configure hardware nodes…\"."
             )
         return None
+
+
+# Former default stop commands that self-match the remote shell, see
+# HardwareNode.resolved_stop_cmd(). Compared whitespace-normalised.
+_LEGACY_STOP_CMDS = frozenset({
+    "pkill -f {bin} || true",
+    "pkill -f '{bin}' || true",
+    'pkill -f "{bin}" || true',
+})
 
 
 def enabled_nodes(nodes: list[HardwareNode]) -> list[HardwareNode]:
@@ -252,8 +271,13 @@ def write_hw_nodes_file(nodes: list[HardwareNode], path: Path) -> None:
         raise
 
 
-def ssh_exec(node: HardwareNode, remote_cmd: str, timeout: float = 30.0) -> str:
-    """Run one shell command on the node, return combined stdout+stderr."""
+def ssh_exec(node: HardwareNode, remote_cmd: str, timeout: float = 30.0,
+             stdin: Optional[str] = None) -> str:
+    """Run one shell command on the node, return combined stdout+stderr.
+
+    `stdin`: optional text fed to the remote command's stdin. sshpass
+    drives the password prompt over its own pty, so stdin stays free
+    for this (used by stop_and_wait to run a script via `sh -s`)."""
     sshpass = _require_sshpass()
     cmd = [
         sshpass, "-e", "ssh",
@@ -265,6 +289,7 @@ def ssh_exec(node: HardwareNode, remote_cmd: str, timeout: float = 30.0) -> str:
         p = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, check=False,
             env=_sshpass_env(node),
+            input=stdin if stdin is not None else "",
         )
     except subprocess.TimeoutExpired as e:
         raise SshError(cmd, -1, f"timeout after {timeout}s") from e
@@ -388,6 +413,91 @@ def is_process_running(node: HardwareNode, timeout: float = 15.0) -> bool:
     except SshError:
         return False
     return bool(out.strip())
+
+
+def _running_probe(node: HardwareNode) -> str:
+    """Shell snippet that exits 0 iff a process whose argv starts with
+    remote_binary exists. Anchored like the default stop_cmd
+    (`pkill -f '^{bin}'`), so the remote `sh -c "..."` wrapper running
+    this very snippet (argv starts with `sh`/`bash`) never matches
+    itself, and neither does an `ssh ... tail -F <log_dir>/...` helper.
+    """
+    b = shlex.quote(node.remote_binary)
+    return f"ps -eo args= | awk -v b={b} 'index($0, b) == 1 {{ f = 1 }} END {{ exit !f }}'"
+
+
+def stop_and_wait(node: HardwareNode, grace_s: float = 5.0, kill_s: float = 2.0,
+                  timeout: float = 30.0) -> str:
+    """Run stop_cmd and block until the node process is really gone.
+
+    stop_cmd's default `pkill -f` only SENDS SIGTERM and returns
+    immediately. The old code followed it with a fixed 0.3 s sleep and
+    then started the next process, so whenever the old instance took
+    longer than that to shut down (graceful shutdown, loaded Pi, slow
+    SD card flushing the session log) two processes with the SAME
+    node_id were briefly live on the same multicast groups. Whether
+    that happened depended purely on timing, i.e. it showed up as
+    sporadic test failures.
+
+    This polls on the node itself (one SSH round trip in total) for up
+    to `grace_s`, escalates to SIGKILL, waits another `kill_s`, and
+    raises SshError if the process still exists after that. Returns any
+    diagnostic output (e.g. the SIGKILL notice) for the caller to log.
+    """
+    probe = _running_probe(node)
+    pattern = shlex.quote("^" + node.remote_binary)
+    n_grace = max(1, int(grace_s * 10))
+    n_kill = max(1, int(kill_s * 10))
+    script = (
+        f"{node.resolved_stop_cmd()}\n"
+        f"i=0; while {probe}; do i=$((i+1)); [ $i -ge {n_grace} ] && break; sleep 0.1; done\n"
+        f"if {probe}; then\n"
+        f"  echo 'still running {grace_s:g}s after stop_cmd, sending SIGKILL'\n"
+        f"  pkill -KILL -f {pattern}\n"
+        f"  i=0; while {probe}; do i=$((i+1)); [ $i -ge {n_kill} ] && break; sleep 0.1; done\n"
+        f"fi\n"
+        f"if {probe}; then echo 'process survived SIGKILL'; exit 3; fi\n"
+        f"exit 0\n"
+    )
+    # Fed via stdin to `sh -s` instead of as the ssh command string:
+    # the remote shell's argv is then just `sh -s` and can never
+    # contain the binary path, so no stop_cmd pattern (anchored or not,
+    # user-edited or not) can match and kill the shell running it.
+    return ssh_exec(node, "sh -s", timeout=timeout, stdin=script).strip()
+
+
+def log_session_id(node: HardwareNode, timeout: float = 15.0) -> str:
+    """Identity of the log session `node_<id>_current.log` currently
+    points at: symlink target plus inode of the resolved file. Changes
+    exactly when a newly started node process has run init_logging()
+    and repointed the symlink. Empty target if the symlink doesn't
+    exist yet."""
+    p = shlex.quote(node.current_log_path())
+    cmd = f'echo "$(readlink {p} 2>/dev/null) $(stat -L -c %i {p} 2>/dev/null)"'
+    return ssh_exec(node, cmd, timeout=timeout).strip()
+
+
+def wait_log_session_change(node: HardwareNode, old_id: str, timeout: float = 10.0) -> bool:
+    """Block until the current-log symlink points at a session other
+    than `old_id` (see log_session_id), polling on the node itself so
+    it costs one SSH round trip. True once the new session exists,
+    False on timeout."""
+    p = shlex.quote(node.current_log_path())
+    cur = f'"$(readlink {p} 2>/dev/null) $(stat -L -c %i {p} 2>/dev/null)"'
+    target = f'"$(readlink {p} 2>/dev/null)"'
+    n = max(1, int(timeout * 10))
+    script = (
+        f"i=0\n"
+        f"while [ {cur} = {shlex.quote(old_id)} ] || [ -z {target} ]; do\n"
+        f"  i=$((i+1)); [ $i -ge {n} ] && exit 4; sleep 0.1\n"
+        f"done\n"
+        f"exit 0\n"
+    )
+    try:
+        ssh_exec(node, script, timeout=timeout + 15.0)
+    except SshError:
+        return False
+    return True
 
 
 def tail_remote_log(node: HardwareNode, lines: int = 20, timeout: float = 15.0) -> str:

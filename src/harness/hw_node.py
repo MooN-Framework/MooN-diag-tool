@@ -15,10 +15,18 @@ core/ssh_deploy.py). Without a reachable current-log file,
 wait_for_log() just times out every call, same as the old _NullNode
 stub in conftest.py used to unconditionally.
 
-Restart semantics: call start_tailing() exactly ONCE per RemoteNode,
-right after construction. Fabric.restart_node() (see conftest.py's
-_HardwareFabric) only stop_cmd/start_cmd's the remote process -- it
-does NOT touch the tail subprocess. `tail -F` re-opens the
+Tailing starts only AFTER the pre-test restart: _HardwareFabric.restart_all()
+(conftest.py) stops every node, starts every node, waits until each
+node's `node_<id>_current.log` symlink points at the NEW session file,
+and only then calls start_tailing(). `tail -n +1` therefore replays
+exactly the fresh session and nothing from the previous test. Starting
+the tail earlier (before the restart) used to replay the previous
+test's whole session into the buffer, where every wait_for_log() call
+could match it.
+
+In-test restarts: call start_tailing() exactly ONCE per RemoteNode.
+_HardwareFabric.restart_node() only stops/starts the remote process --
+it does NOT touch the tail subprocess. `tail -F` re-opens the
 current-log path by name when the framework repoints the
 `node_<id>_current.log` symlink at a new session file on the next
 start, so the SAME tail process keeps streaming lines across a
@@ -42,7 +50,7 @@ from diag_tool.core.ssh_deploy import (
     SshError,
     is_process_running,
     spawn_tail_process,
-    ssh_exec,
+    stop_and_wait,
 )
 
 
@@ -67,6 +75,8 @@ class RemoteNode:
         """Spawn the persistent `ssh ... tail -F <current-log>`
         process. Call once, right after construction -- NOT on every
         restart_node(), see module docstring."""
+        if self._tail_proc is not None:
+            raise RuntimeError(f"node {self.node_id}: start_tailing() called twice")
         self._tail_proc = spawn_tail_process(self.hw, self.hw.current_log_path())
         self._reader_thread = threading.Thread(
             target=self._read_loop,
@@ -90,14 +100,11 @@ class RemoteNode:
         tail, independent of the (bounded, maxlen=100_000) _lines
         buffer's own eviction. Snapshot this right before restarting the
         node and pass it as wait_for_log(after=...) so the wait only
-        matches lines produced by the NEW session -- otherwise, once a
-        pattern has matched once (e.g. the very first successful boot),
-        it keeps matching that same stale buffered line on every later
-        restart, making a readiness check report success instantly
-        without ever confirming the new session actually came up. This
-        is exactly what made restart_all() (see conftest.py's
-        _HardwareFabric) appear to work while every test after the
-        first one actually ran against a not-yet-ready system.
+        matches lines produced by the NEW session. Only meaningful once
+        the tail has caught up: a snapshot taken while the SSH tail is
+        still connecting (or still replaying the file) is too low. This
+        is why the pre-test restart no longer relies on it and starts
+        tailing after the session switch instead (see module docstring).
         """
         with self._lines_lock:
             return self._total_lines_seen
@@ -161,7 +168,7 @@ class RemoteNode:
         the pytest session). This is for tests that explicitly want a
         node gone."""
         try:
-            ssh_exec(self.hw, self.hw.resolved_stop_cmd(), timeout=15.0)
+            stop_and_wait(self.hw)
         except SshError:
             pass
         self._stop_tailing(timeout=timeout)

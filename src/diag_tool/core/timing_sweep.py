@@ -37,6 +37,7 @@ from .ssh_deploy import (
     remote_log_dir_report,
     scp_bytes,
     ssh_exec,
+    stop_and_wait,
     stop_moon_node_service,
     tail_remote_logs,
 )
@@ -489,16 +490,27 @@ class TimingSweep:
     # ---- hardware mode ---------------------------------------------------
 
     def _hw_start(self, cycle_ms: int) -> None:
+        """Deploy this candidate's config to every node, then start ALL
+        nodes together.
+
+        Phase 1 stops moon-node.service (see stop_moon_node_service:
+        a node once deployed via the Package tab may still run the
+        production binary on the same multicast group/port), pushes
+        the TOML with the current cycle_ms and stops the node process
+        (verified). Phase 2 starts every node in parallel and checks
+        each is alive. A per-node stop/start instead booted node 0 into
+        a fabric whose other members were still the previous
+        candidate's processes, which sends it through ResyncLostPeer
+        as a returning peer and, depending on timing, into Failsafe.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
         if not self.p.hardware_nodes:
             raise RuntimeError("hardware mode requires at least one HardwareNode")
-        # For each configured hardware node, stop moon-node.service first
-        # (best-effort -- see stop_moon_node_service docstring: without
-        # this, a node that was ever deployed to via the Package tab
-        # keeps running the production binary from /opt/moon/bin/node
-        # alongside the harness's own test binary, both fighting over
-        # the same multicast group/port), then render its TOML with the
-        # current cycle_ms, SCP it into place, and run the start command.
-        for hn in self.p.hardware_nodes:
+        nodes = list(self.p.hardware_nodes)
+
+        # ---- phase 1: every node down + configured ------------------
+        for hn in nodes:
             self.on_line(f"[{hn.host}] stopping moon-node.service (if present)")
             stop_moon_node_service(hn)
             warn = hn.validate_logging()
@@ -523,40 +535,46 @@ class TimingSweep:
             toml_text = render_config_to_str(spec)
             self.on_line(f"[{hn.host}] deploying config → {hn.remote_config}")
             scp_bytes(hn, toml_text.encode(), hn.remote_config)
-            # stop first (best-effort, ignore failures), then start
             try:
-                ssh_exec(hn, hn.resolved_stop_cmd(), timeout=30.0)
+                out = stop_and_wait(hn)
+                if out:
+                    self.on_line(f"[{hn.host}] {out}")
             except SshError as e:
-                self.on_line(f"[{hn.host}] stop_cmd failed (continuing): {e.output}")
-            time.sleep(0.3)  # let the old process actually exit before the new one rebinds its sockets
+                raise RuntimeError(f"[{hn.host}] stop failed: {e.output or e}") from e
+
+        # ---- phase 2: start all together, then verify each ----------
+        def start(hn: HardwareNode) -> None:
             self.on_line(f"[{hn.host}] starting")
             try:
                 start_out = ssh_exec(hn, hn.resolved_start_cmd(), timeout=30.0)
             except SshError as e:
-                raise RuntimeError(
-                    f"[{hn.host}] start_cmd failed: {e.output}"
-                ) from e
+                raise RuntimeError(f"[{hn.host}] start_cmd failed: {e.output}") from e
             if start_out.strip():
                 # See ensure_remote_dirs(): a failed redirect in the
                 # backgrounded job only shows up here, with rc 0.
                 self.on_line(f"[{hn.host}] start_cmd output: {start_out.strip()}")
+
+        def verify(hn: HardwareNode) -> None:
             # start_cmd exiting 0 only proves the shell backgrounded
             # something -- not that it's still alive. Verify for real.
-            time.sleep(0.5)
             if not is_process_running(hn):
-                tail = tail_remote_logs(hn)
-                env_info = remote_log_dir_report(hn)
                 raise RuntimeError(
                     f"[{hn.host}] process not running after start_cmd "
-                    f"(nohup/& exits 0 even on an immediate crash) -- "
-                    f"start_cmd output: {start_out.strip() or '(none)'}\n"
-                    f"--- remote user / log dir ---\n{env_info}\n"
-                    f"log tail:\n{tail}"
+                    f"(nohup/& exits 0 even on an immediate crash)\n"
+                    f"--- remote user / log dir ---\n{remote_log_dir_report(hn)}\n"
+                    f"log tail:\n{tail_remote_logs(hn)}"
                 )
+
+        with ThreadPoolExecutor(max_workers=len(nodes)) as ex:
+            list(ex.map(start, nodes))
+            time.sleep(1.0)
+            list(ex.map(verify, nodes))
 
     def _hw_stop(self) -> None:
         for hn in self.p.hardware_nodes:
             try:
-                ssh_exec(hn, hn.resolved_stop_cmd(), timeout=30.0)
+                out = stop_and_wait(hn)
+                if out:
+                    self.on_line(f"[{hn.host}] {out}")
             except SshError as e:
-                self.on_line(f"[{hn.host}] stop failed (ignored): {e.output}")
+                self.on_line(f"[{hn.host}] stop failed (ignored): {e.output or e}")

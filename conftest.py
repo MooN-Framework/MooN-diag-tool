@@ -158,10 +158,11 @@ class _HardwareFabric:
     Duck-typed drop-in for harness.fabric.Fabric in hardware mode.
     Spawns nothing -- nodes are already-running, already-installed
     hardware. `nodes` holds one harness.hw_node.RemoteNode per
-    configured+enabled hardware node from --hw-nodes-file, each
-    already tailing its own --log-dir current-session log over SSH
-    (see RemoteNode.start_tailing), so Node.wait_for_log() works the
-    same as it does against a local subprocess.
+    configured+enabled hardware node from --hw-nodes-file. Once
+    restart_all() has run, each one tails its own --log-dir
+    current-session log over SSH (see RemoteNode.start_tailing), so
+    Node.wait_for_log() works the same as it does against a local
+    subprocess.
     """
     def __init__(self, diag, nodes: dict[int, "RemoteNode"]):
         self.diag = diag
@@ -172,13 +173,10 @@ class _HardwareFabric:
 
     def stop_all(self):
         # Only tears down the local SSH tail helpers + diag socket --
-        # deliberately does NOT stop_cmd the remote node processes at
-        # TEARDOWN. Hardware nodes are pushed/deployed once per pytest
-        # session (the diag tool's "Deploy binary + config before run"
-        # step), so leaving the binaries running here is fine -- the
-        # NEXT test's fixture setup calls restart_all() anyway, which
-        # gives it a fresh boot regardless of what state this test left
-        # behind. Stopping here too would just be redundant work.
+        # deliberately does NOT stop the remote node processes at
+        # TEARDOWN. The NEXT test's fixture setup calls restart_all()
+        # anyway, which stops every node (verified) before starting any
+        # of them, so stopping here too would just be redundant work.
         try:
             self.diag.close()
         except Exception:
@@ -186,36 +184,61 @@ class _HardwareFabric:
         for node in self.nodes.values():
             node._stop_tailing()
 
-    def restart_node(self, node_id: int, wait_operational: float = 8.0) -> None:
-        """
-        Stop + start the real remote node process via SSH
-        (resolved_stop_cmd / resolved_start_cmd). The node's tail
-        subprocess is left running throughout -- `tail -F` reopens the
-        current-log symlink by path once the new session's file
-        appears, so the same RemoteNode keeps streaming log lines
-        across the restart (see harness/hw_node.py docstring). No
-        wait_operational check, same as the simulated Fabric: the
-        rejoin flow runs over ResyncLostPeer, not CycleSyncOk, so the
-        test itself should wait via wait_peer_health(..., "Probation").
-        """
-        if node_id not in self.nodes:
-            raise KeyError(f"unknown node_id {node_id}")
-        from diag_tool.core.ssh_deploy import SshError, ssh_exec  # local import, see below
+    # ---- remote process control ---------------------------------------
 
-        rn = self.nodes[node_id]
-        print(f"[restart] node {node_id} ({rn.hw.host}): stopping", flush=True)
-        try:
-            ssh_exec(rn.hw, rn.hw.resolved_stop_cmd(), timeout=15.0)
-        except SshError:
-            pass  # best-effort, matches simulated Fabric.restart_node's "kill if still alive"
-        time.sleep(0.3)  # let the old process actually exit before rebinding its sockets
-        print(f"[restart] node {node_id} ({rn.hw.host}): starting", flush=True)
+    @staticmethod
+    def _stop(rn) -> None:
+        """Stop the remote process and wait until it is really gone
+        (SIGKILL fallback). Raises SshError if it survives."""
+        from diag_tool.core.ssh_deploy import stop_and_wait
+        print(f"[restart] node {rn.node_id} ({rn.hw.host}): stopping", flush=True)
+        out = stop_and_wait(rn.hw)
+        if out:
+            print(f"[restart] node {rn.node_id} ({rn.hw.host}): {out}", flush=True)
+
+    @staticmethod
+    def _start(rn, old_session: str, session_timeout: float = 10.0) -> None:
+        """Run start_cmd and wait until the node has actually opened a
+        NEW log session (current-log symlink repointed). start_cmd's
+        `nohup ... & disown` returns 0 even if the binary crashes
+        immediately, so this is the first real proof of life."""
+        from diag_tool.core.ssh_deploy import (
+            ssh_exec, tail_remote_logs, wait_log_session_change,
+        )
+        print(f"[restart] node {rn.node_id} ({rn.hw.host}): starting", flush=True)
         start_out = ssh_exec(rn.hw, rn.hw.resolved_start_cmd(), timeout=15.0)
         if start_out.strip():
             # A failed redirect in the backgrounded job is only visible
             # here (rc stays 0), see ssh_deploy.ensure_remote_dirs().
-            print(f"[restart] node {node_id} ({rn.hw.host}): start_cmd output: "
+            print(f"[restart] node {rn.node_id} ({rn.hw.host}): start_cmd output: "
                   f"{start_out.strip()}", flush=True)
+        if not wait_log_session_change(rn.hw, old_session, timeout=session_timeout):
+            raise RuntimeError(
+                f"node {rn.node_id} ({rn.hw.host}): no new log session within "
+                f"{session_timeout:.0f}s after start_cmd\n{tail_remote_logs(rn.hw)}"
+            )
+
+    def restart_node(self, node_id: int, wait_operational: float = 8.0) -> None:
+        """
+        Stop + start the real remote node process via SSH. Returns once
+        the old process is verifiably gone and the new one has opened
+        its log session. The node's tail subprocess is left running
+        throughout -- `tail -F` reopens the current-log symlink by path
+        once the new session's file appears, so the same RemoteNode
+        keeps streaming log lines across the restart (see
+        harness/hw_node.py docstring). No wait_operational check, same
+        as the simulated Fabric: the rejoin flow runs over
+        ResyncLostPeer, not CycleSyncOk, so the test itself should wait
+        via wait_peer_health(..., "Probation").
+        """
+        if node_id not in self.nodes:
+            raise KeyError(f"unknown node_id {node_id}")
+        from diag_tool.core.ssh_deploy import log_session_id
+
+        rn = self.nodes[node_id]
+        old_session = log_session_id(rn.hw)
+        self._stop(rn)
+        self._start(rn, old_session)
         _ = wait_operational  # reserved, mirrors the simulated Fabric
 
     def wait_operational(self, timeout: float = 15.0, after: Optional[dict[int, int]] = None) -> bool:
@@ -224,13 +247,9 @@ class _HardwareFabric:
         RemoteNode.start_tailing/wait_for_log) prints this line once
         discovery + sync finished and the first cycle is running.
 
-        `after`: optional {node_id: line_count} watermark (see
-        RemoteNode.line_count), one per node, restricting the match to
-        lines produced since that point. Without it, a pattern that
-        already matched once earlier in this pytest session (e.g. the
-        very first successful boot) matches that same stale buffered
-        line again instantly -- see restart_all()'s docstring for why
-        that's a real bug, not a theoretical one.
+        `after`: optional {node_id: line_count} watermark, see
+        RemoteNode.line_count. Not needed after restart_all(), whose
+        tails only ever see the fresh session.
         """
         pat = r"transition from=CycleSync event=CycleSyncOk to=ReadInputs"
         for node_id, node in self.nodes.items():
@@ -243,34 +262,48 @@ class _HardwareFabric:
         return True
 
     def restart_all(self, wait_operational: float = 15.0) -> bool:
-        """Stop + start EVERY managed node fresh, then wait for all of
-        them to reach the first operational cycle.
+        """Give every managed node a fresh boot, equivalent to the
+        simulated Fabric's start_all() + wait_operational().
 
-        Hardware nodes are only pushed/deployed ONCE per pytest session
-        (the diag tool's "Deploy binary + config before run" step, see
-        stop_all()'s docstring) -- without restarting the
-        already-running binaries between tests, state left over from
-        one scenario (isolated peers, altered session_id/sequence
-        counters, injected faults) carries straight into the next one
-        and breaks it. Call this once per test, from the fabric_N
-        fixture's setup, mirroring the simulated Fabric's fresh
-        start_all() + wait_operational() every test gets for free.
+        Three phases, each run on all nodes in parallel:
+          1. stop every node and wait until each process is really
+             gone,
+          2. start every node and wait until each has opened a new log
+             session,
+          3. only then start the SSH log tails and wait for operational.
 
-        Captures each node's line_count() watermark BEFORE restarting
-        it and passes it through to wait_operational(after=...) --
-        without this, the readiness check matches the FIRST test's
-        "CycleSyncOk" line (still sitting in the tail buffer) on every
-        subsequent restart and reports success immediately, without the
-        new session having actually come up yet. That made every test
-        after the first one run against a system that wasn't really
-        ready, even though restart_all() itself ran correctly.
+        Why this shape (each point was a source of sporadic failures):
+        - A rolling restart (stop+start node 0, then node 1, ...) booted
+          node 0 into a fabric whose other members were still the
+          previous test's processes, possibly faulted, and then killed
+          them underneath it. What node 0 made of that depended on SSH
+          latency.
+        - A fixed sleep after stop_cmd did not guarantee the old process
+          had exited, so two processes with the same node_id could be
+          live at once.
+        - Tails were started before the restart with `tail -n +1`, so
+          each RemoteNode's buffer began with the previous test's whole
+          session. The line_count watermark meant to skip it was taken
+          before the SSH tail had even connected (i.e. usually 0), so
+          the old session's CycleSyncOk satisfied the readiness check
+          and every log assertion in the test could match lines from
+          the previous test.
         """
-        watermarks: dict[int, int] = {}
-        print(f"[restart] pre-test: restarting all {len(self.nodes)} node(s) fresh", flush=True)
-        for node_id, node in self.nodes.items():
-            watermarks[node_id] = node.line_count
-            self.restart_node(node_id)
-        ok = self.wait_operational(timeout=wait_operational, after=watermarks)
+        from concurrent.futures import ThreadPoolExecutor
+        from diag_tool.core.ssh_deploy import log_session_id
+
+        nodes = list(self.nodes.values())
+        print(f"[restart] pre-test: restarting all {len(nodes)} node(s) fresh", flush=True)
+        with ThreadPoolExecutor(max_workers=len(nodes)) as ex:
+            old_sessions = dict(zip(
+                (rn.node_id for rn in nodes),
+                ex.map(lambda rn: log_session_id(rn.hw), nodes),
+            ))
+            list(ex.map(self._stop, nodes))
+            list(ex.map(lambda rn: self._start(rn, old_sessions[rn.node_id]), nodes))
+        for rn in nodes:
+            rn.start_tailing()
+        ok = self.wait_operational(timeout=wait_operational)
         print(f"[restart] pre-test restart {'OK' if ok else 'FAILED'}", flush=True)
         return ok
 
@@ -312,11 +345,9 @@ def _make_hardware_fabric(request, expected_nodes: int):
         interface_ip=request.config.getoption("--interface-ip"),
     )
 
-    nodes: dict[int, RemoteNode] = {}
-    for hn in chosen:
-        rn = RemoteNode(node_id=hn.node_id, hw=hn)
-        rn.start_tailing()
-        nodes[hn.node_id] = rn
+    # Tails are NOT started here: restart_all() starts them once each
+    # node has opened its new log session, see its docstring.
+    nodes = {hn.node_id: RemoteNode(node_id=hn.node_id, hw=hn) for hn in chosen}
     fabric = _HardwareFabric(diag, nodes)
 
     # Fresh boot before every test -- see _HardwareFabric.restart_all()'s
@@ -335,7 +366,12 @@ def _make_hardware_fabric(request, expected_nodes: int):
     # reachability before restarting made every test after that one
     # fail immediately at discovery, restart_all() never even reached.
     restart_timeout = request.config.getoption("--discovery-timeout")
-    if not fabric.restart_all(wait_operational=restart_timeout):
+    try:
+        ok = fabric.restart_all(wait_operational=restart_timeout)
+    except Exception:
+        fabric.stop_all()
+        raise
+    if not ok:
         fabric.stop_all()
         raise RuntimeError(
             f"hardware fabric: nodes did not reach operational within "
